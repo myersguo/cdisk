@@ -35,8 +35,8 @@ Cleanup is intentionally fail-closed:
   checks, exclusive same-parent isolation, and mount-boundary checks.
 
 This does not claim protection from a malicious process running as the same
-macOS user and continuously racing filesystem state. Review `README.md` and
-`docs/mole-benchmark.md` for current limits.
+macOS user and continuously racing filesystem state. Review `README.md` for
+the current limits.
 
 ## Distribution
 

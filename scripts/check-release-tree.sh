@@ -6,6 +6,7 @@ matches=$(mktemp "${TMPDIR:-/tmp}/cdisk-release-scan.XXXXXX")
 trap 'rm -f "$matches"' EXIT
 
 git ls-files --cached --others --exclude-standard | while IFS= read -r file; do
+  test -f "$file" || continue
   case "$file" in
     pnpm-lock.yaml|src-tauri/Cargo.lock|scripts/check-release-tree.sh|*.png|*.icns)
       continue
