@@ -1,0 +1,28 @@
+{
+  "name": "cdisk",
+  "private": true,
+  "version": "0.5.2",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test": "node --experimental-strip-types --test tests/domain.test.mjs",
+    "test:browser": "node tests/i18n.cjs && node tests/ui.cjs && node tests/tasks.cjs",
+    "tauri": "tauri",
+    "verify": "pnpm test && pnpm build && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "^5.1.0",
+    "playwright": "1.63.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.3.1"
+  }
+}

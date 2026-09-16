@@ -1,0 +1,30 @@
+[package]
+name = "cdisk"
+version = "0.5.2"
+description = "A focused macOS disk cleanup utility"
+authors = ["myersguo"]
+license = "MIT"
+repository = "https://github.com/myersguo/cdisk"
+publish = false
+edition = "2021"
+rust-version = "1.92"
+
+[lib]
+name = "cdisk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.11", features = [] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+incremental = false

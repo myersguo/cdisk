@@ -1,0 +1,25 @@
+# JavaScript / frontend build output
+node_modules/
+dist/
+*.log
+
+# Rust / Tauri build and local delivery artifacts
+src-tauri/target/
+release/
+src-tauri/gen/schemas/
+
+# Local app data, secrets, signing, and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+settings.json
+history.json
+
+# OS / editor files
+.DS_Store
+.idea/
+.vscode/
