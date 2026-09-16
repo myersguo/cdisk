@@ -115,7 +115,7 @@ const assert = require("node:assert/strict");
               setTimeout(() => eventHandlers["cleanup-validation-progress"]?.({ payload: {
                 scanId: args.scanId, completed: 1, total: 1, currentPath: item.path,
               } }), 30);
-              setTimeout(() => resolve({ token: "fixture-token", items: [item], estimatedBytes: 4096 }), 90);
+              setTimeout(() => resolve({ token: "fixture-token", items: [item], estimatedBytes: 4096 }), 500);
             });
           }
           if (command === "execute_cleanup") {
