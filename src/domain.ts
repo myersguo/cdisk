@@ -1,6 +1,10 @@
 import { localeTag, t, type MessageKey } from "./locales.ts";
 
 export type ScanMode = "quick" | "projects" | "installers" | "full";
+export type DailyCategory =
+  "system" | "user" | "application" | "browser" |
+  "logs" | "temporary" | "downloads" | "trash";
+export type DailyCategoryGroup = "cache" | "hygiene";
 export type View = ScanMode | "history" | "settings";
 export type Settings = { projectRoots: string[]; excludedPaths: string[] };
 export type Disk = { totalBytes: number; availableBytes: number };
@@ -39,6 +43,16 @@ export const sections: { id: View; labelKey: MessageKey; detailKey: MessageKey; 
   { id: "history", labelKey: "nav.history", detailKey: "nav.historyDetail", icon: "history" },
   { id: "settings", labelKey: "nav.settings", detailKey: "nav.settingsDetail", icon: "shield" },
 ];
+export const dailyCategories: { id: DailyCategory; group: DailyCategoryGroup; labelKey: MessageKey; detailKey: MessageKey }[] = [
+  { id: "system", group: "cache", labelKey: "daily.system", detailKey: "daily.systemDetail" },
+  { id: "user", group: "cache", labelKey: "daily.user", detailKey: "daily.userDetail" },
+  { id: "application", group: "cache", labelKey: "daily.application", detailKey: "daily.applicationDetail" },
+  { id: "browser", group: "cache", labelKey: "daily.browser", detailKey: "daily.browserDetail" },
+  { id: "logs", group: "hygiene", labelKey: "daily.logs", detailKey: "daily.logsDetail" },
+  { id: "temporary", group: "hygiene", labelKey: "daily.temporary", detailKey: "daily.temporaryDetail" },
+  { id: "downloads", group: "hygiene", labelKey: "daily.downloads", detailKey: "daily.downloadsDetail" },
+  { id: "trash", group: "hygiene", labelKey: "daily.trash", detailKey: "daily.trashDetail" },
+];
 export const isScan = (view: View): view is ScanMode => view !== "history" && view !== "settings";
 export const bytes = (value: number): string => {
   if (!Number.isFinite(value)) return "—";
@@ -65,6 +79,23 @@ export function visibleItems(items: Candidate[], query: string, category: string
 }
 export function selection(items: Candidate[], selected: Set<string>) {
   return items.filter(item => item.cleanable && item.complete && selected.has(item.id));
+}
+export function dailyCategoryFor(category: string): DailyCategory | null {
+  if (category === "系统缓存") return "system";
+  if (category === "用户缓存" || category === "开发缓存") return "user";
+  if (category === "应用缓存" || category === "日志") return "application";
+  if (category === "浏览器数据") return "browser";
+  if (category === "日志与诊断") return "logs";
+  if (category === "过期临时文件") return "temporary";
+  if (category === "下载残留") return "downloads";
+  if (category === "废纸篓") return "trash";
+  return null;
+}
+export function dailyScope(items: Candidate[], selected: Set<DailyCategory>) {
+  return items.filter(item => {
+    const category = dailyCategoryFor(item.category);
+    return category === null || selected.has(category);
+  });
 }
 export function applySettings(item: Candidate, settings: Settings): Candidate {
   const excludedBy = settings.excludedPaths.find(rule =>
@@ -105,7 +136,10 @@ const statusKeys: Record<string, MessageKey> = {
 };
 export const statusLabel = (status: string) => statusKeys[status] ? t(statusKeys[status]) : status;
 const categoryKeys: Record<string, MessageKey> = {
-  "开发缓存": "category.development", "应用缓存": "category.application", "日志": "category.logs",
+  "系统缓存": "category.system", "用户缓存": "category.user", "应用缓存": "category.application",
+  "浏览器数据": "category.browser", "开发缓存": "category.user", "日志": "category.application",
+  "日志与诊断": "category.logs", "过期临时文件": "category.temporary",
+  "下载残留": "category.downloads", "废纸篓": "category.trash",
   "项目产物": "category.project", "安装包": "category.installer", "目录": "category.folder", "文件": "category.file",
 };
 export const categoryLabel = (category: string) => categoryKeys[category] ? t(categoryKeys[category]) : category;

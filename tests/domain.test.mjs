@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applySettings, bytes, categoryLabel, diskHealth, visibleItems, selection, parsePaths, emptyTask, mergeProgress, statusLabel } from "../src/domain.ts";
+import { applySettings, bytes, categoryLabel, diskHealth, visibleItems, selection, dailyScope, parsePaths, emptyTask, mergeProgress, statusLabel } from "../src/domain.ts";
 import { localizeBackendText, resolveLocale, setCurrentLocale, t } from "../src/locales.ts";
 
 const items = [
@@ -23,6 +23,28 @@ test("searches paths, filters category, sorts without mutating source", () => {
   assert.equal(visibleItems(items, "", "开发缓存", "size").length, 1);
   assert.equal(visibleItems(items, "", "", "size")[0].id, "private");
   assert.equal(items[0].id, "cache");
+});
+
+test("daily cleanup exposes cache and disk hygiene categories", () => {
+  setCurrentLocale("en");
+  assert.equal(categoryLabel("系统缓存"), "System cache");
+  assert.equal(categoryLabel("用户缓存"), "User cache");
+  assert.equal(categoryLabel("应用缓存"), "App cache");
+  assert.equal(categoryLabel("浏览器数据"), "Browser data");
+  assert.equal(categoryLabel("日志与诊断"), "Logs & diagnostics");
+  assert.equal(categoryLabel("过期临时文件"), "Expired temporary files");
+  assert.equal(categoryLabel("下载残留"), "Download remnants");
+  assert.equal(categoryLabel("废纸篓"), "Trash");
+});
+
+test("daily cleanup scope hides unselected categories without mutating results", () => {
+  const categorized = [
+    { ...items[0], category: "系统缓存" },
+    { ...items[1], category: "浏览器数据" },
+    { ...items[0], id: "trash", category: "废纸篓" },
+  ];
+  assert.deepEqual(dailyScope(categorized, new Set(["browser", "trash"])).map(item => item.id), ["private", "trash"]);
+  assert.equal(categorized.length, 3);
 });
 
 test("units and path list are explicit", () => {
@@ -77,7 +99,7 @@ test("locale follows supported system languages and persists explicit choices", 
 
   setCurrentLocale("en");
   assert.equal(t("nav.quick"), "Daily cleanup");
-  assert.equal(categoryLabel("开发缓存"), "Developer cache");
+  assert.equal(categoryLabel("开发缓存"), "User cache");
   assert.equal(localizeBackendText("Go 编译缓存"), "Go build cache");
   assert.equal(localizeBackendText("可重新生成；仍需确认后才会永久删除"), "Rebuildable. Permanent removal still requires confirmation.");
   assert.equal(localizeBackendText("只清理指定缓存或日志目录，不清理账号、会话和系统数据。"), "Cleans only the named cache or log folder, never accounts, sessions, or system data.");

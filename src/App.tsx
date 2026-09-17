@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api";
-import { age, applySettings, bytes, categoryLabel, diskHealth, emptyTask, formatCount, isScan, mergeProgress, parsePaths, sections, selection, statusLabel, taskActive, visibleItems } from "./domain";
-import type { Bootstrap, Candidate, HistoryEntry, Preview, Progress, Report, ScanMode, ScanTask, ValidationProgress, View } from "./domain";
+import { age, applySettings, bytes, categoryLabel, diskHealth, emptyTask, formatCount, isScan, mergeProgress, parsePaths, dailyCategories, dailyScope, sections, selection, statusLabel, taskActive, visibleItems } from "./domain";
+import type { Bootstrap, Candidate, HistoryEntry, Preview, Progress, DailyCategory, ScanMode, ScanTask, ValidationProgress, View } from "./domain";
 import { LOCALE_OPTIONS, t, useLocale } from "./i18n";
 import { localizeBackendText, localeTag } from "./locales";
 
@@ -69,6 +69,26 @@ function Empty({ title, text, icon = "search" }: { title: string; text: string; 
   return <div className="empty-state"><div className="empty-icon"><Icon name={icon} /></div><h2>{title}</h2><p>{text}</p></div>;
 }
 
+function DailyScope({ selection, locked, onToggle }: {
+  selection: Set<DailyCategory>; locked: boolean; onToggle: (category: DailyCategory) => void;
+}) {
+  return <section className="daily-scope" aria-labelledby="daily-scope-title">
+    <div className="daily-scope-heading"><div><strong id="daily-scope-title">{t("daily.title")}</strong>
+      <p>{t("daily.help")}</p></div><span>{t("daily.selected", { count: selection.size })}</span></div>
+    {(["cache", "hygiene"] as const).map(group => <div className="daily-scope-section" key={group}>
+      <strong>{t(group === "cache" ? "daily.cacheGroup" : "daily.hygieneGroup")}</strong>
+      <div className="daily-scope-grid">{dailyCategories.filter(option => option.group === group).map(option => {
+        const checked = selection.has(option.id);
+        return <label key={option.id} className={checked ? "selected" : ""}>
+          <input type="checkbox" checked={checked} disabled={locked} onChange={() => onToggle(option.id)} />
+          <span><strong>{t(option.labelKey)}</strong><small>{t(option.detailKey)}</small></span>
+        </label>;
+      })}</div>
+    </div>)}
+    <p className="daily-safety"><Icon name="shield" />{t("daily.safety")}</p>
+  </section>;
+}
+
 function LanguageSwitcher() {
   const { locale, setLocale } = useLocale();
   return <details className="language-menu">
@@ -103,6 +123,9 @@ export default function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [rootsText, setRootsText] = useState("");
   const [excludedText, setExcludedText] = useState("");
+  const [dailySelection, setDailySelection] = useState<Set<DailyCategory>>(
+    () => new Set(dailyCategories.map(category => category.id)),
+  );
   const busy = useRef(false);
   const controls = useRef(new Map<string, api.DemoControl>());
   const validationScanId = useRef("");
@@ -158,6 +181,10 @@ export default function App() {
   }
   async function scan(mode: ScanMode, root: string | null = null) {
     if (busy.current || taskActive(tasksRef.current[mode])) return;
+    if (mode === "quick" && !dailySelection.size) {
+      setError(t("daily.selectOne"));
+      return;
+    }
     setError(""); setNotice("");
     const scanId = `scan-${crypto.randomUUID()}`;
     const control = { paused: false, cancelled: false };
@@ -165,7 +192,7 @@ export default function App() {
     patch(mode, { ...emptyTask(), id: scanId, state: "running", root: root || tasksRef.current[mode].root,
       progress: { scanId, mode, scannedEntries: 0, unreadableEntries: 0, currentPath: root || t("scan.preparing") } });
     try {
-      const next = await api.scan(mode, scanId, root, control, receive);
+      const next = await api.scan(mode, scanId, root, [...dailySelection], control, receive);
       if (tasksRef.current[mode].id !== scanId) return;
       patch(mode, current => ({ ...current, report: next, candidates: next.candidates,
         root: next.root, state: "done", controlPending: false,
@@ -333,16 +360,21 @@ export default function App() {
   const metadata = sections.find(s => s.id === view)!;
   const disk = report?.disk ?? boot?.disk ?? null;
   const health = diskHealth(disk);
-  const items = useMemo(() => visibleItems(task.candidates, query, category, sort), [task.candidates, query, category, sort]);
-  const chosen = selection(task.candidates, selected);
-  const active = task.candidates.find(i => i.id === activeId);
-  const categories = ["", ...new Set(task.candidates.map(i => i.category))];
-  const total = task.candidates.filter(i => i.cleanable && i.complete).reduce((n, i) => n + i.bytes, 0);
-  const largest = Math.max(1, ...task.candidates.map(i => i.bytes));
+  const scopedCandidates = useMemo(
+    () => view === "quick" ? dailyScope(task.candidates, dailySelection) : task.candidates,
+    [view, task.candidates, dailySelection],
+  );
+  const items = useMemo(() => visibleItems(scopedCandidates, query, category, sort), [scopedCandidates, query, category, sort]);
+  const chosen = selection(scopedCandidates, selected);
+  const active = scopedCandidates.find(i => i.id === activeId);
+  const categories = ["", ...new Set(scopedCandidates.map(i => i.category))];
+  const total = scopedCandidates.filter(i => i.cleanable && i.complete).reduce((n, i) => n + i.bytes, 0);
+  const largest = Math.max(1, ...scopedCandidates.map(i => i.bytes));
   const full = view === "full";
   const locked = operation !== null || scanning;
   const selectionLocked = operation !== null || task.state === "running" || task.state === "cancelling";
   const canPreview = task.state === "paused" || task.state === "done";
+  const dailySelectionLocked = taskActive(tasks.quick) || operation !== null;
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -355,7 +387,7 @@ export default function App() {
           <small className="task-indicator">{tasks[section.id].state === "paused" ? t("task.paused") : tasks[section.id].state === "cancelling" ? t("task.cancelling") : t("task.scanning")}</small> : view === section.id && <i />}
       </button>)}</nav>
       <div className="sidebar-bottom"><LanguageSwitcher /><div className="local-note"><Icon name="shield" /><span>{t("nav.localOnly")}<br /><small>{t("nav.localNote")}</small></span></div></div>
-      <small className="version">CDisk 0.5.2</small>
+      <small className="version">CDisk 0.6.0</small>
     </aside>
     <main>
       <header className="page-header"><div><h1>{t(metadata.labelKey)}</h1><p>{t(metadata.detailKey)}</p></div>
@@ -380,6 +412,19 @@ export default function App() {
         </button>
       </section>}
       {isScan(view) && <>
+        {view === "quick" && <DailyScope selection={dailySelection} locked={dailySelectionLocked}
+          onToggle={option => setDailySelection(current => {
+            const next = new Set(current);
+            if (next.has(option)) next.delete(option); else next.add(option);
+            const visible = dailyScope(tasksRef.current.quick.candidates, next);
+            patch("quick", task => ({
+              ...task,
+              selected: new Set([...task.selected].filter(id => visible.some(item => item.id === id))),
+              activeId: visible.some(item => item.id === task.activeId) ? task.activeId : visible[0]?.id ?? "",
+              category: visible.some(item => item.category === task.category) ? task.category : "",
+            }));
+            return next;
+          })} />}
         <section className="disk-summary" aria-label={t("disk.summary")}>
           <div><Icon name="disk" /><div><strong>Macintosh HD <span>Data</span></strong><p className={health.tone}>{health.label}</p></div></div>
           <div className="disk-capacity"><strong>{disk ? bytes(disk.availableBytes) : "—"}<span> {t("disk.available")}</span></strong>

@@ -9,6 +9,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const DATA_VOLUME: &str = "/System/Volumes/Data";
 const RECENT_SECONDS: u64 = 7 * 24 * 3600;
+const OLD_LOG_SECONDS: u64 = 30 * 24 * 3600;
+const STALE_SECONDS: u64 = 7 * 24 * 3600;
 pub const MAX_RESULTS: usize = 500;
 
 fn retain_largest(targets: &mut Vec<Target>, target: Target) -> bool {
@@ -284,6 +286,11 @@ impl<F: FnMut(ScanProgress), C: FnMut(Target)> Walk<'_, F, C> {
         if failure.is_none() && measurement.sensitive {
             failure = Some(("system", "发现嵌套 Git、环境配置或密钥文件".into()));
         }
+        if failure.is_none() {
+            failure = daily_policy(path, category, home)
+                .err()
+                .map(|error| ("system", error));
+        }
         if category == "项目产物" && failure.is_none() {
             failure = safety::project_proof(path).err().map(|e| ("system", e));
         }
@@ -335,6 +342,18 @@ impl<F: FnMut(ScanProgress), C: FnMut(Target)> Walk<'_, F, C> {
                         "只清理 Git ignore 的生成目录；保留跟踪文件、嵌套仓库和敏感配置。"
                     }
                     "安装包" => "先确认安装完成且不再需要；已挂载或运行中的安装包不能清理。",
+                    "系统缓存" => {
+                        "只清理当前用户目录内的 macOS 缓存与诊断数据；不访问系统级缓存。"
+                    }
+                    "浏览器数据" => {
+                        "只清理浏览器缓存与临时网页数据；保留 Cookie、历史、书签、密码和登录会话。"
+                    }
+                    "日志与诊断" => "只清理 30 天以上的明确崩溃报告和日志。",
+                    "过期临时文件" => {
+                        "只清理至少 7 天未使用的明确临时文件；恢复草稿始终受保护。"
+                    }
+                    "下载残留" => "只清理至少 7 天未使用的未完成下载残留。",
+                    "废纸篓" => "废纸篓项目始终需要手动选择，永久删除后无法恢复。",
                     _ => "只清理指定缓存或日志目录，不清理账号、会话和系统数据。",
                 }
                 .into(),
@@ -463,79 +482,464 @@ pub fn default_roots(home: &Path) -> Vec<String> {
     .collect()
 }
 
-// Empty owner lists use path-scoped occupancy (not a global Node/IDE gate).
-// App-owned caches/logs additionally require their exact owning app to exit.
-// Application Support, VM/runtime and toolchain roots are not cleanup rules.
-const RULES: &[(&str, &str, &str, &[&str])] = &[
-    (".go/build-cache", "Go 编译缓存", "开发缓存", &[]),
-    (
-        "Library/Caches/go-build",
-        "Go 默认编译缓存",
-        "开发缓存",
-        &[],
-    ),
-    (".go/cache", "Go 模块下载", "开发缓存", &[]),
-    ("go/pkg/mod", "Go 默认模块缓存", "开发缓存", &[]),
-    (".npm-user-cache/_cacache", "npm 下载缓存", "开发缓存", &[]),
-    (".npm/_cacache", "npm 默认缓存", "开发缓存", &[]),
-    ("Library/pnpm/store", "pnpm 共享缓存", "开发缓存", &[]),
-    (".bun/install/cache", "Bun 下载缓存", "开发缓存", &[]),
-    (".cache/uv", "uv Python 缓存", "开发缓存", &[]),
-    ("Library/Caches/pip", "pip 下载缓存", "开发缓存", &[]),
-    (
-        "Library/Caches/Homebrew",
-        "Homebrew 下载缓存",
-        "开发缓存",
-        &[],
-    ),
-    (
-        "Library/Caches/Google/Chrome",
-        "Chrome 网页缓存",
-        "应用缓存",
-        &["Google Chrome.app"],
-    ),
-    (
-        "Library/Caches/com.microsoft.VSCode.ShipIt",
-        "VS Code 更新包",
-        "应用缓存",
-        &["Visual Studio Code.app"],
-    ),
-    (
-        "Library/Caches/LarkShell",
-        "飞书缓存",
-        "应用缓存",
-        &["Lark.app", "Feishu.app"],
-    ),
-    (
-        "Library/Caches/com.tencent.xinWeChat",
-        "微信缓存",
-        "应用缓存",
-        &["WeChat.app"],
-    ),
-    (
-        "Library/Logs/com.openai.codex",
-        "Codex 日志",
-        "日志",
-        &["Codex.app", "ChatGPT.app", "codex"],
-    ),
-    (
-        "Library/Logs/JetBrains",
-        "JetBrains 日志",
-        "日志",
-        &["GoLand.app", "PyCharm.app", "IntelliJ IDEA.app"],
-    ),
+struct DailyRule {
+    relative: &'static str,
+    title: &'static str,
+    category: DailyCategory,
+    owners: &'static [&'static str],
+}
+
+// Every rule stays under the current user's home directory. "System cache"
+// means user-scoped macOS diagnostic/temp data, never /System or /Library.
+// Browser rules intentionally exclude history, cookies, passwords and sessions.
+const RULES: &[DailyRule] = &[
+    DailyRule {
+        relative: "Library/Caches/com.apple.helpd",
+        title: "macOS 帮助缓存",
+        category: DailyCategory::System,
+        owners: &[],
+    },
+    DailyRule {
+        relative: "Library/Caches/com.apple.nsurlsessiond",
+        title: "用户网络缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: ".go/build-cache",
+        title: "Go 编译缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: "Library/Caches/go-build",
+        title: "Go 默认编译缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: ".go/cache",
+        title: "Go 模块下载",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: "go/pkg/mod",
+        title: "Go 默认模块缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: ".npm-user-cache/_cacache",
+        title: "npm 下载缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: ".npm/_cacache",
+        title: "npm 默认缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: "Library/pnpm/store",
+        title: "pnpm 共享缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: ".bun/install/cache",
+        title: "Bun 下载缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: ".cache/uv",
+        title: "uv Python 缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: "Library/Caches/pip",
+        title: "pip 下载缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: "Library/Caches/Homebrew",
+        title: "Homebrew 下载缓存",
+        category: DailyCategory::User,
+        owners: &[],
+    },
+    DailyRule {
+        relative: "Library/Caches/com.microsoft.VSCode.ShipIt",
+        title: "VS Code 更新包",
+        category: DailyCategory::Application,
+        owners: &["Visual Studio Code.app"],
+    },
+    DailyRule {
+        relative: "Library/Caches/LarkShell",
+        title: "飞书缓存",
+        category: DailyCategory::Application,
+        owners: &["Lark.app", "Feishu.app"],
+    },
+    DailyRule {
+        relative: "Library/Caches/com.tencent.xinWeChat",
+        title: "微信缓存",
+        category: DailyCategory::Application,
+        owners: &["WeChat.app"],
+    },
+    DailyRule {
+        relative: "Library/Caches/Google/Chrome",
+        title: "Chrome 网页缓存",
+        category: DailyCategory::Browser,
+        owners: &["Google Chrome.app"],
+    },
+    DailyRule {
+        relative: "Library/Caches/Firefox/Profiles",
+        title: "Firefox 网页缓存",
+        category: DailyCategory::Browser,
+        owners: &["Firefox.app"],
+    },
+    DailyRule {
+        relative: "Library/Caches/Microsoft Edge",
+        title: "Edge 网页缓存",
+        category: DailyCategory::Browser,
+        owners: &["Microsoft Edge.app"],
+    },
+    DailyRule {
+        relative: "Library/Caches/BraveSoftware",
+        title: "Brave 网页缓存",
+        category: DailyCategory::Browser,
+        owners: &["Brave Browser.app"],
+    },
+    DailyRule {
+        relative: "Library/Caches/company.thebrowser.Browser",
+        title: "Arc 网页缓存",
+        category: DailyCategory::Browser,
+        owners: &["Arc.app"],
+    },
 ];
+
+fn daily_category(category: DailyCategory) -> &'static str {
+    match category {
+        DailyCategory::System => "系统缓存",
+        DailyCategory::User => "用户缓存",
+        DailyCategory::Application => "应用缓存",
+        DailyCategory::Browser => "浏览器数据",
+        DailyCategory::Logs => "日志与诊断",
+        DailyCategory::Temporary => "过期临时文件",
+        DailyCategory::Downloads => "下载残留",
+        DailyCategory::Trash => "废纸篓",
+    }
+}
+
+fn older_than(meta: &fs::Metadata, seconds: u64) -> bool {
+    u64::try_from(meta.mtime())
+        .ok()
+        .is_some_and(|modified| now().saturating_sub(modified) >= seconds)
+}
+
+fn stale_download(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "crdownload" | "download" | "partial" | "part"
+            )
+        })
+}
+
+fn temporary_name(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    name.ends_with(".tmp") || name.ends_with(".temp") || name.ends_with(".partial")
+}
+
+fn trash_volumes() -> Vec<PathBuf> {
+    safety::mount_paths()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|mount| mount.starts_with("/Volumes"))
+        .filter_map(|mount| {
+            let uid = unsafe { libc::geteuid() };
+            let path = mount.join(".Trashes").join(uid.to_string());
+            path.is_dir().then_some(path)
+        })
+        .collect()
+}
+
+struct DailySource {
+    root: PathBuf,
+    title: &'static str,
+    trash: bool,
+    depth: usize,
+    owners: &'static [&'static str],
+}
+
+fn daily_sources(category: DailyCategory, home: &Path) -> Vec<DailySource> {
+    match category {
+        DailyCategory::Logs => vec![
+            DailySource {
+                root: home.join("Library/Logs/DiagnosticReports"),
+                title: "诊断报告",
+                trash: false,
+                depth: 1,
+                owners: &[],
+            },
+            DailySource {
+                root: home.join("Library/Logs/com.openai.codex"),
+                title: "Codex 旧日志",
+                trash: false,
+                depth: 2,
+                owners: &["Codex.app", "ChatGPT.app", "codex"],
+            },
+            DailySource {
+                root: home.join("Library/Logs/JetBrains"),
+                title: "JetBrains 旧日志",
+                trash: false,
+                depth: 3,
+                owners: &["GoLand.app", "PyCharm.app", "IntelliJ IDEA.app"],
+            },
+            DailySource {
+                root: home.join("Library/Logs"),
+                title: "旧日志",
+                trash: false,
+                depth: 1,
+                owners: &[],
+            },
+        ],
+        DailyCategory::Temporary => fs::canonicalize(std::env::temp_dir())
+            .ok()
+            .map(|root| {
+                vec![DailySource {
+                    root,
+                    title: "过期临时文件",
+                    trash: false,
+                    depth: 1,
+                    owners: &[],
+                }]
+            })
+            .unwrap_or_default(),
+        DailyCategory::Downloads => vec![
+            DailySource {
+                root: home.join("Downloads"),
+                title: "失败下载残留",
+                trash: false,
+                depth: 1,
+                owners: &[],
+            },
+            DailySource {
+                root: home.join("Desktop"),
+                title: "失败下载残留",
+                trash: false,
+                depth: 1,
+                owners: &[],
+            },
+        ],
+        DailyCategory::Trash => {
+            let mut sources = vec![DailySource {
+                root: home.join(".Trash"),
+                title: "废纸篓项目",
+                trash: true,
+                depth: 1,
+                owners: &[],
+            }];
+            sources.extend(trash_volumes().into_iter().map(|root| DailySource {
+                root,
+                title: "外置磁盘废纸篓项目",
+                trash: true,
+                depth: 1,
+                owners: &[],
+            }));
+            sources
+        }
+        _ => vec![],
+    }
+}
+
+fn daily_source_matches(
+    category: DailyCategory,
+    path: &Path,
+    metadata: &fs::Metadata,
+    trash: bool,
+) -> bool {
+    if metadata.file_type().is_symlink() || !(metadata.is_dir() || metadata.is_file()) {
+        return false;
+    }
+    match category {
+        DailyCategory::Logs => {
+            metadata.is_file()
+                && older_than(metadata, OLD_LOG_SECONDS)
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "log" | "crash" | "diag" | "ips"
+                        )
+                    })
+        }
+        DailyCategory::Temporary => {
+            metadata.is_file() && older_than(metadata, STALE_SECONDS) && temporary_name(path)
+        }
+        DailyCategory::Downloads => {
+            metadata.is_file() && older_than(metadata, STALE_SECONDS) && stale_download(path)
+        }
+        DailyCategory::Trash => trash,
+        _ => false,
+    }
+}
+
+fn is_daily_hygiene_category(category: &str) -> bool {
+    matches!(
+        category,
+        "日志与诊断" | "过期临时文件" | "下载残留" | "废纸篓"
+    )
+}
+
+fn valid_trash_item(path: &Path, home: &Path) -> bool {
+    if path.parent() == Some(home.join(".Trash").as_path()) {
+        return true;
+    }
+    let uid = unsafe { libc::geteuid() }.to_string();
+    path.parent().is_some_and(|parent| {
+        parent.starts_with("/Volumes")
+            && parent.file_name().is_some_and(|name| name == uid.as_str())
+            && parent
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".Trashes")
+    })
+}
+
+fn daily_policy(path: &Path, category: &str, home: &Path) -> Result<(), String> {
+    if !is_daily_hygiene_category(category) {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    let allowed = match category {
+        "日志与诊断" => {
+            let roots = [
+                home.join("Library/Logs/DiagnosticReports"),
+                home.join("Library/Logs/com.openai.codex"),
+                home.join("Library/Logs/JetBrains"),
+                home.join("Library/Logs"),
+            ];
+            roots.iter().any(|root| path.starts_with(root))
+                && daily_source_matches(DailyCategory::Logs, path, &metadata, false)
+        }
+        "过期临时文件" => {
+            let root = fs::canonicalize(std::env::temp_dir()).map_err(|error| error.to_string())?;
+            path.starts_with(root)
+                && daily_source_matches(DailyCategory::Temporary, path, &metadata, false)
+        }
+        "下载残留" => {
+            matches!(path.parent(), Some(parent) if parent == home.join("Downloads") || parent == home.join("Desktop"))
+                && daily_source_matches(DailyCategory::Downloads, path, &metadata, false)
+        }
+        "废纸篓" => {
+            valid_trash_item(path, home)
+                && daily_source_matches(DailyCategory::Trash, path, &metadata, true)
+        }
+        _ => false,
+    };
+    allowed
+        .then_some(())
+        .ok_or_else(|| "项目不再符合日常清理规则，请重新扫描".into())
+}
+
+fn scan_daily_source<F: FnMut(ScanProgress), C: FnMut(Target)>(
+    walk: &mut Walk<'_, F, C>,
+    category: DailyCategory,
+    home: &Path,
+    processes: &Result<String, String>,
+    targets: &mut Vec<Target>,
+) -> bool {
+    let mut truncated = false;
+    for source in daily_sources(category, home) {
+        let mut directories = vec![(source.root, 0_usize)];
+        let mut visited = 0_usize;
+        while let Some((directory, depth)) = directories.pop() {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries {
+                visited += 1;
+                if visited > 10_000 {
+                    walk.skipped += 1;
+                    break;
+                }
+                if walk.cancelled() {
+                    return truncated;
+                }
+                let Ok(entry) = entry else {
+                    walk.errors += 1;
+                    continue;
+                };
+                let path = entry.path();
+                let Ok(metadata) = fs::symlink_metadata(&path) else {
+                    walk.errors += 1;
+                    continue;
+                };
+                if category == DailyCategory::Logs
+                    && metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && depth + 1 < source.depth
+                {
+                    directories.push((path, depth + 1));
+                    continue;
+                }
+                if !daily_source_matches(category, &path, &metadata, source.trash) {
+                    continue;
+                }
+                let item_title = if category == DailyCategory::Trash {
+                    entry.file_name().to_string_lossy().into_owned()
+                } else {
+                    format!("{} · {}", source.title, entry.file_name().to_string_lossy())
+                };
+                if let Some(mut target) = walk.target(
+                    &path,
+                    &item_title,
+                    daily_category(category),
+                    source.owners,
+                    home,
+                    processes,
+                ) {
+                    if category == DailyCategory::Trash {
+                        target.item.recommended = false;
+                        if target.item.cleanable {
+                            target.item.status = "review".into();
+                            target.item.reason = "废纸篓项目需手动选择；永久删除后无法恢复".into();
+                        }
+                    }
+                    truncated |= walk.record(targets, target);
+                }
+            }
+            if walk.cancelled() {
+                return truncated;
+            }
+        }
+    }
+    truncated
+}
 
 pub fn run<F: FnMut(ScanProgress), C: FnMut(Target)>(
     id: &str,
     mode: ScanMode,
-    requested_root: Option<&str>,
+    selection: (Option<&str>, &[DailyCategory]),
     home: &Path,
     settings: &Settings,
     cancel: &ScanControl,
     callbacks: (F, C),
 ) -> Result<(ScanReport, Vec<Target>), String> {
     let (emit, record_target) = callbacks;
+    let (requested_root, daily_categories) = selection;
     let start = Instant::now();
     let root = if mode == ScanMode::Full {
         let raw = Path::new(requested_root.unwrap_or(DATA_VOLUME));
@@ -571,19 +975,36 @@ pub fn run<F: FnMut(ScanProgress), C: FnMut(Target)>(
     let mut truncated = false;
     match mode {
         ScanMode::Quick => {
-            for &(relative, title, category, owners) in RULES {
+            if daily_categories.is_empty() {
+                return Err("请至少选择一个清理类别".into());
+            }
+            for rule in RULES {
                 if walk.cancelled() {
                     break;
                 }
+                if !daily_categories.contains(&rule.category) {
+                    continue;
+                }
                 if let Some(item) = walk.target(
-                    &home.join(relative),
-                    title,
-                    category,
-                    owners,
+                    &home.join(rule.relative),
+                    rule.title,
+                    daily_category(rule.category),
+                    rule.owners,
                     home,
                     &processes,
                 ) {
                     truncated |= walk.record(&mut targets, item);
+                }
+            }
+            for category in [
+                DailyCategory::Logs,
+                DailyCategory::Temporary,
+                DailyCategory::Downloads,
+                DailyCategory::Trash,
+            ] {
+                if daily_categories.contains(&category) {
+                    truncated |=
+                        scan_daily_source(&mut walk, category, home, &processes, &mut targets);
                 }
             }
         }
@@ -757,6 +1178,7 @@ pub fn cleanup_precheck(target: &Target, home: &Path, settings: &Settings) -> Re
     let identity = target.identity.as_ref().ok_or("没有可清理的路径凭据")?;
     safety::protect(&identity.path, home, settings)?;
     safety::verify(identity)?;
+    daily_policy(&identity.path, &target.item.category, home)?;
     if target.item.category == "安装包" {
         safety::installer_unmounted(&identity.path)?;
     }
@@ -919,7 +1341,7 @@ mod tests {
         let (report, targets) = run(
             "fixture",
             ScanMode::Full,
-            home.to_str(),
+            (home.to_str(), &DailyCategory::ALL),
             &home,
             &settings,
             &cancel,
@@ -933,7 +1355,7 @@ mod tests {
         let (nested, _) = run(
             "nested",
             ScanMode::Full,
-            home.join("folder").to_str(),
+            (home.join("folder").to_str(), &DailyCategory::ALL),
             &home,
             &settings,
             &cancel,
@@ -945,7 +1367,7 @@ mod tests {
         let (cancelled, _) = run(
             "cancel",
             ScanMode::Full,
-            home.to_str(),
+            (home.to_str(), &DailyCategory::ALL),
             &home,
             &settings,
             &cancel,
@@ -995,7 +1417,7 @@ mod tests {
         let (report, targets) = run(
             "quick",
             ScanMode::Quick,
-            None,
+            (None, &[DailyCategory::User]),
             &home,
             &settings,
             &cancel,
@@ -1013,6 +1435,210 @@ mod tests {
         };
         assert!(cleanup_check(&target, &home, &protected).is_err());
         assert!(cache.exists()); // preview/validation never deletes.
+    }
+
+    #[test]
+    fn quick_scan_respects_selected_categories_and_keeps_browser_personal_data_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let cache = home.join("Library/Caches/Google/Chrome");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("data"), b"cache").unwrap();
+        let personal = home.join("Library/Application Support/Google/Chrome/Default");
+        fs::create_dir_all(&personal).unwrap();
+        fs::write(personal.join("History"), b"private").unwrap();
+        let settings = Settings::default();
+        let control = ScanControl::default();
+
+        let (report, _) = run(
+            "browser-only",
+            ScanMode::Quick,
+            (None, &[DailyCategory::Browser]),
+            &home,
+            &settings,
+            &control,
+            (|_| {}, |_| {}),
+        )
+        .unwrap();
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.candidates[0].category, "浏览器数据");
+        assert_eq!(report.candidates[0].path, cache.display().to_string());
+        assert!(report
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.path.contains("Application Support")));
+
+        assert!(run(
+            "no-categories",
+            ScanMode::Quick,
+            (None, &[]),
+            &home,
+            &settings,
+            &ScanControl::default(),
+            (|_| {}, |_| {}),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn daily_hygiene_discovers_only_old_explicit_files_and_revalidates_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let downloads = home.join("Downloads");
+        fs::create_dir(&downloads).unwrap();
+        let stale = downloads.join("video.crdownload");
+        let complete = downloads.join("video.mp4");
+        fs::write(&stale, b"partial").unwrap();
+        fs::write(&complete, b"complete").unwrap();
+        for path in [&stale, &complete] {
+            let (ok, _) = safety::command_output(
+                "/usr/bin/touch",
+                &["-t", "200001010000", &path.to_string_lossy()],
+                None,
+            )
+            .unwrap();
+            assert!(ok);
+        }
+
+        let control = ScanControl::default();
+        let (report, targets) = run(
+            "downloads",
+            ScanMode::Quick,
+            (None, &[DailyCategory::Downloads]),
+            &home,
+            &Settings::default(),
+            &control,
+            (|_| {}, |_| {}),
+        )
+        .unwrap();
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.candidates[0].path, stale.display().to_string());
+        assert_eq!(report.candidates[0].category, "下载残留");
+
+        let renamed = downloads.join("renamed.mp4");
+        fs::rename(&stale, &renamed).unwrap();
+        assert!(daily_policy(&renamed, "下载残留", &home).is_err());
+        assert!(cleanup_precheck(&targets[0], &home, &Settings::default()).is_err());
+    }
+
+    #[test]
+    fn daily_hygiene_enforces_log_and_temporary_age_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let logs = home.join("Library/Logs/DiagnosticReports");
+        fs::create_dir_all(&logs).unwrap();
+        let old_log = logs.join("old.ips");
+        let recent_log = logs.join("recent.ips");
+        let wrong_log = logs.join("old.txt");
+        for path in [&old_log, &recent_log, &wrong_log] {
+            fs::write(path, b"log").unwrap();
+        }
+        for path in [&old_log, &wrong_log] {
+            assert!(
+                safety::command_output(
+                    "/usr/bin/touch",
+                    &["-t", "200001010000", &path.to_string_lossy()],
+                    None,
+                )
+                .unwrap()
+                .0
+            );
+        }
+        let (logs_report, _) = run(
+            "logs",
+            ScanMode::Quick,
+            (None, &[DailyCategory::Logs]),
+            &home,
+            &Settings::default(),
+            &ScanControl::default(),
+            (|_| {}, |_| {}),
+        )
+        .unwrap();
+        assert_eq!(logs_report.candidates.len(), 1);
+        assert_eq!(
+            logs_report.candidates[0].path,
+            old_log.display().to_string()
+        );
+
+        let user_temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let unique = format!("cdisk-old-{}.tmp", std::process::id());
+        let old_temp = user_temp.join(unique);
+        let recent_temp = user_temp.join(format!("cdisk-recent-{}.tmp", std::process::id()));
+        fs::write(&old_temp, b"old").unwrap();
+        fs::write(&recent_temp, b"recent").unwrap();
+        assert!(
+            safety::command_output(
+                "/usr/bin/touch",
+                &["-t", "200001010000", &old_temp.to_string_lossy()],
+                None,
+            )
+            .unwrap()
+            .0
+        );
+        let (temporary_report, _) = run(
+            "temporary",
+            ScanMode::Quick,
+            (None, &[DailyCategory::Temporary]),
+            &home,
+            &Settings::default(),
+            &ScanControl::default(),
+            (|_| {}, |_| {}),
+        )
+        .unwrap();
+        assert!(temporary_report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.path == old_temp.display().to_string()));
+        assert!(temporary_report
+            .candidates
+            .iter()
+            .all(|candidate| candidate.path != recent_temp.display().to_string()));
+        fs::remove_file(old_temp).unwrap();
+        fs::remove_file(recent_temp).unwrap();
+    }
+
+    #[test]
+    fn trash_items_are_individual_and_never_recommended() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let trash = home.join(".Trash");
+        fs::create_dir(&trash).unwrap();
+        fs::write(trash.join("old.txt"), b"trash").unwrap();
+        let (report, _) = run(
+            "trash",
+            ScanMode::Quick,
+            (None, &[DailyCategory::Trash]),
+            &home,
+            &Settings::default(),
+            &ScanControl::default(),
+            (|_| {}, |_| {}),
+        )
+        .unwrap();
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.candidates[0].title, "old.txt");
+        assert_eq!(report.candidates[0].status, "review");
+        assert!(!report.candidates[0].recommended);
+    }
+
+    #[test]
+    fn daily_hygiene_rejects_matching_files_outside_approved_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let document = home.join("Documents/private.log");
+        fs::create_dir_all(document.parent().unwrap()).unwrap();
+        fs::write(&document, b"private").unwrap();
+        assert!(
+            safety::command_output(
+                "/usr/bin/touch",
+                &["-t", "200001010000", &document.to_string_lossy()],
+                None,
+            )
+            .unwrap()
+            .0
+        );
+        assert!(daily_policy(&document, "日志与诊断", &home).is_err());
+        assert!(daily_policy(&document, "下载残留", &home).is_err());
+        assert!(daily_policy(&document, "废纸篓", &home).is_err());
     }
 
     #[test]
@@ -1068,17 +1694,28 @@ mod tests {
             next_id: 0,
         };
         let processes = Ok("/Applications/GoLand.app/Contents/MacOS/goland\n/opt/homebrew/bin/node\n/opt/homebrew/bin/bash\n/usr/bin/python\n".into());
-        for &(relative, title, category, patterns) in RULES {
-            if category != "开发缓存" {
+        for rule in RULES {
+            if rule.category != DailyCategory::User {
                 continue;
             }
-            let path = home.join(relative);
+            let path = home.join(rule.relative);
             fs::create_dir_all(&path).unwrap();
             fs::write(path.join("fixture"), b"cache").unwrap();
             let target = walk
-                .target(&path, title, category, patterns, &home, &processes)
+                .target(
+                    &path,
+                    rule.title,
+                    daily_category(rule.category),
+                    rule.owners,
+                    &home,
+                    &processes,
+                )
                 .unwrap();
-            assert!(target.item.cleanable, "{relative}: {}", target.item.reason);
+            assert!(
+                target.item.cleanable,
+                "{}: {}",
+                rule.relative, target.item.reason
+            );
             cleanup_check(&target, &home, &settings).unwrap();
             assert!(path.exists());
         }
@@ -1235,7 +1872,7 @@ mod tests {
         let (report, _) = run(
             "streamed",
             ScanMode::Projects,
-            None,
+            (None, &DailyCategory::ALL),
             &home,
             &settings,
             &control,
@@ -1275,7 +1912,7 @@ mod tests {
         let (report, _) = run(
             "stream-target",
             ScanMode::Projects,
-            None,
+            (None, &DailyCategory::ALL),
             &home,
             &settings,
             &control,
@@ -1304,7 +1941,7 @@ mod tests {
             let (report, _) = run(
                 "live-smoke",
                 mode,
-                None,
+                (None, &DailyCategory::ALL),
                 &home,
                 &settings,
                 &cancel,
@@ -1313,7 +1950,7 @@ mod tests {
             .unwrap();
             if mode == ScanMode::Quick {
                 assert!(report.candidates.iter().all(|candidate| {
-                    candidate.category != "开发缓存"
+                    candidate.category != "用户缓存"
                         || candidate.protection.as_deref() != Some("app_running")
                 }));
             }
@@ -1330,7 +1967,7 @@ mod tests {
         let (report, targets) = run(
             "live-cancel",
             ScanMode::Full,
-            Some(DATA_VOLUME),
+            (Some(DATA_VOLUME), &DailyCategory::ALL),
             &home,
             &settings,
             &cancel,

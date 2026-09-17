@@ -15,13 +15,17 @@ const assert = require("node:assert/strict");
       page.on("pageerror", e => errors.push(e.message));
       await page.goto("http://127.0.0.1:1420", { waitUntil: "networkidle" });
       assert.equal(await page.locator(".candidate-row").count(), 0);
+      assert.equal(await page.locator(".daily-scope input:checked").count(), 8);
+      await page.getByText("系统缓存", { exact: true }).click();
+      assert.equal(await page.locator(".daily-scope input:checked").count(), 7);
       await page.getByRole("button", { name: "开始扫描", exact: true }).click();
       await page.locator(".candidate-row").first().waitFor();
       await page.getByRole("button", { name: "重新扫描", exact: true }).waitFor();
-      assert.equal(await page.locator('input[type=checkbox]:checked').count(), 0);
-      assert.equal(await page.locator('input[type=checkbox]:disabled').count(), 2);
+      assert.equal(await page.locator(".candidate-row input[type=checkbox]:checked").count(), 0);
+      assert.equal(await page.locator(".candidate-row input[type=checkbox]:disabled").count(), 2);
+      assert.equal(await page.getByText("系统缓存", { exact: true }).count(), 1);
       await page.getByRole("button", { name: "选择建议项", exact: true }).click();
-      assert.equal(await page.locator('input[type=checkbox]:checked').count(), 3);
+      assert.ok(await page.locator(".candidate-row input[type=checkbox]:checked").count() >= 2);
       await page.getByRole("button", { name: "预览清理", exact: true }).click();
       await page.getByRole("dialog").waitFor();
       assert.equal(await page.getByRole("button", { name: "演示模式不执行清理" }).isDisabled(), true);
@@ -30,6 +34,10 @@ const assert = require("node:assert/strict");
       await page.getByLabel("搜索名称或路径").fill("Chrome");
       assert.equal(await page.locator(".candidate-row").count(), 1);
       await page.getByLabel("搜索名称或路径").fill("");
+      await page.getByText("浏览器数据", { exact: true }).first().click();
+      assert.equal(await page.getByText("Chrome 网页缓存", { exact: true }).count(), 0);
+      await page.getByText("浏览器数据", { exact: true }).click();
+      assert.equal(await page.getByText("Chrome 网页缓存", { exact: true }).count(), 1);
       await page.screenshot({ path: `/tmp/cdisk-quick-${width}.png` });
 
       await page.getByRole("button", { name: "项目瘦身", exact: true }).click();
@@ -105,6 +113,11 @@ const assert = require("node:assert/strict");
           if (command === "bootstrap") return { disk, home: "/fixture", history: [], settings: { projectRoots: [], excludedPaths: [] } };
           if (command === "scan_disk") {
             if (!args.scanId || !args.mode) throw new Error("Missing scanId/mode");
+            if (args.mode === "quick") {
+              if (JSON.stringify(args.dailyCategories) !== JSON.stringify(["system", "user", "application", "browser", "logs", "temporary", "downloads", "trash"])) {
+                throw new Error("Wrong quick categories");
+              }
+            }
             return { scanId: args.scanId, mode: args.mode, root: "/fixture", parent: "/", disk,
               scannedEntries: 1, unreadableEntries: 0, skippedEntries: 0, cancelled: false,
               truncated: false, elapsedMs: 1, candidates: [item] };

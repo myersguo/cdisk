@@ -10,6 +10,32 @@ pub enum ScanMode {
     Full,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum DailyCategory {
+    System,
+    User,
+    Application,
+    Browser,
+    Logs,
+    Temporary,
+    Downloads,
+    Trash,
+}
+
+impl DailyCategory {
+    pub const ALL: [Self; 8] = [
+        Self::System,
+        Self::User,
+        Self::Application,
+        Self::Browser,
+        Self::Logs,
+        Self::Temporary,
+        Self::Downloads,
+        Self::Trash,
+    ];
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {

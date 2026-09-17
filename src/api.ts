@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Bootstrap, Candidate, Progress, Report, ScanMode, Settings, SettingsUpdate, ValidationProgress } from "./domain";
+import type { Bootstrap, Candidate, Progress, DailyCategory, Report, ScanMode, Settings, SettingsUpdate, ValidationProgress } from "./domain";
 
 export const native = "__TAURI_INTERNALS__" in window;
 const home = "/Users/demo";
@@ -20,13 +20,18 @@ export async function saveSettings(settings: Settings): Promise<SettingsUpdate> 
   previewSettings = settings;
   return { settings };
 }
-const fixtures: [string, string, number, string, string][] = [
-  ["Go 编译缓存", ".go/build-cache", 8.4, "开发缓存", "ready"],
-  ["Homebrew 下载缓存", "Library/Caches/Homebrew", 2.2, "开发缓存", "ready"],
-  ["Chrome 网页缓存", "Library/Caches/Google/Chrome", 1.3, "应用缓存", "app_running"],
-  ["uv Python 缓存", ".cache/uv", 0.8, "开发缓存", "review"],
-  ["Codex 日志", "Library/Logs/com.openai.codex", 0.4, "日志", "app_running"],
-  ["pip 下载缓存", "Library/Caches/pip", 0.3, "开发缓存", "ready"],
+const fixtures: [string, string, number, string, string, DailyCategory][] = [
+  ["Go 编译缓存", ".go/build-cache", 8.4, "用户缓存", "ready", "user"],
+  ["Homebrew 下载缓存", "Library/Caches/Homebrew", 2.2, "用户缓存", "ready", "user"],
+  ["系统诊断报告", "Library/Logs/DiagnosticReports", 0.6, "系统缓存", "review", "system"],
+  ["VS Code 更新包", "Library/Caches/com.microsoft.VSCode.ShipIt", 0.7, "应用缓存", "review", "application"],
+  ["Codex 日志", "Library/Logs/com.openai.codex", 0.4, "应用缓存", "app_running", "application"],
+  ["Chrome 网页缓存", "Library/Caches/Google/Chrome", 1.3, "浏览器数据", "app_running", "browser"],
+  ["Firefox 网页缓存", "Library/Caches/Firefox", 0.9, "浏览器数据", "review", "browser"],
+  ["诊断报告 · CDisk.ips", "Library/Logs/DiagnosticReports/CDisk.ips", 0.2, "日志与诊断", "ready", "logs"],
+  ["过期临时文件 · export.tmp", ".tmp/export.tmp", 0.5, "过期临时文件", "ready", "temporary"],
+  ["失败下载残留 · video.crdownload", "Downloads/video.crdownload", 1.1, "下载残留", "review", "downloads"],
+  ["old-archive.zip", ".Trash/old-archive.zip", 2.4, "废纸篓", "review", "trash"],
 ];
 function item(title: string, path: string, size: number, category: string, status: string, index: number): Candidate {
   const cleanable = ["ready", "review"].includes(status);
@@ -44,11 +49,13 @@ function item(title: string, path: string, size: number, category: string, statu
   };
 }
 export type DemoControl = { paused: boolean; cancelled: boolean };
-export async function scan(mode: ScanMode, scanId: string, root: string | null,
+export async function scan(mode: ScanMode, scanId: string, root: string | null, dailyCategories: DailyCategory[],
   control: DemoControl, progress: (p: Progress) => void): Promise<Report> {
-  if (native) return call("scan_disk", { mode, scanId, root });
+  if (native) return call("scan_disk", { mode, scanId, root, dailyCategories });
   const base = root || home;
-  const candidates = mode === "quick" ? fixtures.map((f, i) => item(f[0], `${home}/${f[1]}`, f[2], f[3], f[4], i)) :
+  if (mode === "quick" && !dailyCategories.length) throw new Error("请至少选择一个清理类别");
+  const candidates = mode === "quick" ? fixtures.filter(f => dailyCategories.includes(f[5]))
+    .map((f, i) => item(f[0], `${home}/${f[1]}`, f[2], f[3], f[4], i)) :
     mode === "projects" ? Array.from({ length: 24 }, (_, i) => item(`project-${i + 1} / target`,
       `${home}/repos/project-${i + 1}/target`, 4.8 - i * 0.17, "项目产物", i % 3 === 0 ? "review" : "ready", i)) :
     mode === "installers" ? ["Editor.dmg", "Design.dmg", "Tools.dmg"].map((name, i) =>

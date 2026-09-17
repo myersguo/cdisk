@@ -343,7 +343,16 @@ pub fn excluded(path: &Path, settings: &Settings) -> bool {
 }
 
 pub fn protect(path: &Path, home: &Path, settings: &Settings) -> Result<(), String> {
-    if !plain_path(path) || path == home || !path.starts_with(home) {
+    let volume_trash = path.starts_with("/Volumes")
+        && path
+            .components()
+            .any(|component| component.as_os_str() == ".Trashes");
+    let user_temp = fs::canonicalize(std::env::temp_dir()).ok();
+    let temporary = user_temp
+        .as_ref()
+        .is_some_and(|directory| path.starts_with(directory) && path != directory);
+    if !plain_path(path) || path == home || (!path.starts_with(home) && !volume_trash && !temporary)
+    {
         return Err("系统目录、其他用户数据或用户主目录受保护".into());
     }
     if excluded(path, settings) {

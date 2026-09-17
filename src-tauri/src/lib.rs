@@ -152,6 +152,21 @@ fn validate_candidate_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_daily_categories(
+    mode: ScanMode,
+    categories: Option<Vec<DailyCategory>>,
+) -> Result<Vec<DailyCategory>, String> {
+    let categories = categories.unwrap_or_else(|| DailyCategory::ALL.to_vec());
+    let unique = categories.iter().copied().collect::<HashSet<_>>();
+    if categories.len() > DailyCategory::ALL.len() || unique.len() != categories.len() {
+        return Err("清理类别无效".into());
+    }
+    if mode == ScanMode::Quick && categories.is_empty() {
+        return Err("请至少选择一个清理类别".into());
+    }
+    Ok(categories)
+}
+
 #[tauri::command]
 fn bootstrap(store: tauri::State<'_, Storage>) -> Result<Bootstrap, String> {
     Ok(Bootstrap {
@@ -170,8 +185,10 @@ async fn scan_disk(
     mode: ScanMode,
     scan_id: String,
     root: Option<String>,
+    daily_categories: Option<Vec<DailyCategory>>,
 ) -> Result<ScanReport, String> {
     validate_id(&scan_id)?;
+    let daily_categories = validate_daily_categories(mode, daily_categories)?;
     let state = Arc::clone(&state);
     let (guard, control) = begin_scan(&state, mode, &scan_id)?;
     let settings = store.settings()?;
@@ -195,7 +212,7 @@ async fn scan_disk(
         let (report, targets) = scanner::run(
             &scan_id,
             mode,
-            root.as_deref(),
+            (root.as_deref(), &daily_categories),
             &scanner::home()?,
             &settings,
             &control,
@@ -1031,6 +1048,16 @@ mod tests {
         assert!(validate_id("scan-123").is_ok());
         assert!(validate_candidate_id("../item").is_err());
         assert!(validate_candidate_id(&"a".repeat(129)).is_err());
+        assert!(validate_daily_categories(ScanMode::Quick, Some(vec![])).is_err());
+        assert!(validate_daily_categories(
+            ScanMode::Quick,
+            Some(vec![DailyCategory::User, DailyCategory::User])
+        )
+        .is_err());
+        assert_eq!(
+            validate_daily_categories(ScanMode::Quick, None).unwrap(),
+            DailyCategory::ALL
+        );
         let snapshot = Snapshot {
             id: "scan".into(),
             mode: ScanMode::Quick,

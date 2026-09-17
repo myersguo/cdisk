@@ -203,6 +203,10 @@ const assert = require("node:assert/strict");
     const calls = await nativePage.evaluate(() => window.__taskCalls);
     const quick = calls.find(c => c.command === "scan_disk" && c.args.mode === "quick").args.scanId;
     const project = calls.find(c => c.command === "scan_disk" && c.args.mode === "projects").args.scanId;
+    assert.deepEqual(
+      calls.find(c => c.command === "scan_disk" && c.args.mode === "quick").args.dailyCategories,
+      ["system", "user", "application", "browser", "logs", "temporary", "downloads", "trash"],
+    );
     assert.notEqual(quick, project);
     assert.equal(calls.find(c => c.command === "pause_scan").args.scanId, quick);
     assert.equal(calls.filter(c => c.command === "scan_candidates").length, 1);

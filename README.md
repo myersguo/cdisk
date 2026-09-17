@@ -34,8 +34,9 @@ brew install --cask myersguo/tap/cdisk
   language and saves an explicit language choice locally.
 - **Focused desktop interface:** a compact sidebar, clear selection states,
   and independently scrolling candidate and detail panes.
-- **Daily cleanup:** individual cache and log candidates with search,
-  categories, path-usage checks, and running-application protection.
+- **Daily cleanup:** selectable cache categories plus old logs, expired
+  temporary files, incomplete downloads, and per-item Trash review, with
+  path-usage checks and running-application protection.
 - **Project cleanup:** configurable development roots with Git ignored/tracked
   checks, nested repository and sensitive-file protection, and conservative
   handling of artifacts used during the last seven days.
@@ -96,6 +97,11 @@ path-scoped open-file checks instead of a broad runtime-name gate. App-owned
 caches and logs for Chrome, Lark, WeChat, Codex, and JetBrains applications
 also check whether their exact `.app` owner is running. Probe timeouts or
 malformed output produce an unknown state and block cleanup.
+
+Daily disk hygiene uses conservative age and file-type boundaries: logs and
+diagnostics must be at least 30 days old; recognized temporary files and
+incomplete downloads must be unused for at least 7 days. Trash items are shown
+individually and are never selected by the recommended-selection action.
 
 CDisk does not currently provide application uninstalling, system
 optimization, live monitoring, or Finder Trash recovery.

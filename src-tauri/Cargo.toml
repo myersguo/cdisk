@@ -1,6 +1,6 @@
 [package]
 name = "cdisk"
-version = "0.5.2"
+version = "0.6.0"
 description = "A focused macOS disk cleanup utility"
 authors = ["myersguo"]
 license = "MIT"
