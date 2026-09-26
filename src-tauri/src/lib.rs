@@ -406,6 +406,17 @@ fn choose_targets(snapshot: &Snapshot, ids: &[String]) -> Result<Vec<Target>, St
     Ok(targets)
 }
 
+fn remove_cleaned_targets(snapshot: &mut Snapshot, outcomes: &[ItemOutcome]) {
+    let removed_paths = outcomes
+        .iter()
+        .filter(|item| item.status == "removed")
+        .map(|item| item.path.as_str())
+        .collect::<HashSet<_>>();
+    snapshot
+        .targets
+        .retain(|_, target| !removed_paths.contains(target.item.path.as_str()));
+}
+
 fn choose_snapshot_targets(
     state: &State,
     scan_id: &str,
@@ -671,6 +682,86 @@ fn cancel_preparation(state: &State, scan_id: &str) -> Result<bool, String> {
     Ok(false)
 }
 
+// Targets are disjoint (choose_targets). Keep audit writes serialized, while each
+// worker refreshes safety evidence immediately before removing its own target.
+fn cleanup_in_parallel<C, R, S>(history: &mut HistoryEntry, check: C, remove: R, record: S)
+where
+    C: Fn(usize) -> Result<(), String> + Sync,
+    R: Fn(usize) -> Result<u64, String> + Sync,
+    S: Fn(&HistoryEntry) -> Result<(), String> + Sync,
+{
+    let count = history.items.len();
+    let shared = Mutex::new(history);
+    let next = AtomicUsize::new(0);
+    // ponytail: cap filesystem/probe contention at four targets; tune only with workload measurements.
+    thread::scope(|scope| {
+        for _ in 0..count.min(4) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= count {
+                    break;
+                }
+                {
+                    let mut history = shared.lock().unwrap();
+                    if history.status != "running" {
+                        break;
+                    }
+                    history.items[index].status = "running".into();
+                    history.items[index].message = "正在执行最终安全检查；尚未删除".into();
+                    if let Err(error) = record(&history) {
+                        history.status = "partial".into();
+                        history.items[index].status = "skipped".into();
+                        history.items[index].message = format!("记录保存失败，已停止：{error}");
+                        break;
+                    }
+                }
+                let eligibility = check(index);
+                let outcome = eligibility.and_then(|_| {
+                    {
+                        let mut history = shared.lock().unwrap();
+                        if history.status != "running" {
+                            return Err("记录保存失败，已停止；尚未删除".into());
+                        }
+                        history.items[index].message =
+                            "正在处理；若应用中断，请检查路径现状".into();
+                        if let Err(error) = record(&history) {
+                            history.status = "partial".into();
+                            history.items[index].message = "正在执行最终安全检查；尚未删除".into();
+                            return Err(format!("记录保存失败，已停止：{error}"));
+                        }
+                    }
+                    remove(index)
+                });
+                let mut history = shared.lock().unwrap();
+                match outcome {
+                    Ok(bytes) => {
+                        history.items[index].status = "removed".into();
+                        history.items[index].message = "已永久清理".into();
+                        history.estimated_bytes = history.estimated_bytes.saturating_add(bytes);
+                    }
+                    Err(error) => {
+                        history.items[index].status = if history.items[index].message
+                            == "正在执行最终安全检查；尚未删除"
+                        {
+                            "skipped"
+                        } else {
+                            "failed"
+                        }
+                        .into();
+                        history.items[index].message = error;
+                    }
+                }
+                if let Err(error) = record(&history) {
+                    history.status = "partial".into();
+                    history.items[index]
+                        .message
+                        .push_str(&format!("；记录保存失败，已停止：{error}"));
+                }
+            });
+        }
+    });
+}
+
 #[tauri::command]
 async fn execute_cleanup(
     state: tauri::State<'_, Arc<State>>,
@@ -720,47 +811,19 @@ async fn execute_cleanup(
                 .collect(),
         };
         store.record(&history)?; // Fail before deleting if the audit record cannot be persisted.
-        for (index, target) in plan.targets.iter().enumerate() {
-            history.items[index].status = "running".into();
-            history.items[index].message = "正在执行最终安全检查；尚未删除".into();
-            store.record(&history)?;
-            // Rebuild runtime/mount evidence for every item immediately before deletion.
-            let eligibility = scanner::cleanup_check(target, &home, &settings);
-            let outcome = eligibility.and_then(|_| {
-                history.items[index].message = "正在处理；若应用中断，请检查路径现状".into();
-                store.record(&history)?;
+        cleanup_in_parallel(
+            &mut history,
+            |index| scanner::cleanup_check(&plan.targets[index], &home, &settings),
+            |index| {
+                let target = &plan.targets[index];
                 safety::remove(
                     target.identity.as_ref().ok_or("缺少路径身份")?,
                     &format!("{}-{index}", plan.token),
-                )
-            });
-            match outcome {
-                Ok(()) => {
-                    history.items[index].status = "removed".into();
-                    history.items[index].message = "已永久清理".into();
-                    history.estimated_bytes =
-                        history.estimated_bytes.saturating_add(target.item.bytes);
-                }
-                Err(error) => {
-                    history.items[index].status = if history.items[index].message
-                        == "正在执行最终安全检查；尚未删除"
-                    {
-                        "skipped"
-                    } else {
-                        "failed"
-                    }
-                    .into();
-                    history.items[index].message = error;
-                }
-            }
-            if let Err(error) = store.record(&history) {
-                history.status = "partial".into();
-                history.items[index]
-                    .message
-                    .push_str(&format!("；记录保存失败，已停止：{error}"));
-                break;
-            }
-        }
+                )?;
+                Ok(target.item.bytes)
+            },
+            |history| store.record(history),
+        );
         if history.status == "running" {
             history.status = if history.items.iter().all(|i| i.status == "removed") {
                 "complete"
@@ -777,13 +840,12 @@ async fn execute_cleanup(
                     .push_str(&format!("；最终记录保存失败：{error}"));
             }
         }
-        // Other pages keep their snapshots; every future cleanup revalidates current paths.
-        state
-            .data
-            .lock()
-            .map_err(|_| "状态不可用")?
-            .snapshots
-            .retain(|_, snapshot| snapshot.id != plan.scan_id);
+        // Keep the scan usable after cleanup. Only successfully removed targets
+        // leave the snapshot; skipped and failed targets remain available for review.
+        let mut data = state.data.lock().map_err(|_| "状态不可用")?;
+        if let Some(snapshot) = data.snapshots.values_mut().find(|s| s.id == plan.scan_id) {
+            remove_cleaned_targets(snapshot, &history.items);
+        }
         Ok(history)
     })
     .await
@@ -854,6 +916,224 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cleanup_history(count: usize) -> HistoryEntry {
+        HistoryEntry {
+            id: "cleanup-test".into(),
+            started_at: 0,
+            status: "running".into(),
+            estimated_bytes: 0,
+            available_before: 0,
+            available_after: None,
+            items: (0..count)
+                .map(|index| ItemOutcome {
+                    title: index.to_string(),
+                    path: index.to_string(),
+                    status: "pending".into(),
+                    message: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn cleanup_overlaps_four_targets_and_preserves_outcomes() {
+        let mut history = cleanup_history(12);
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(4);
+        let removed = Mutex::new(Vec::new());
+        cleanup_in_parallel(
+            &mut history,
+            |index| {
+                let running = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(running, Ordering::SeqCst);
+                if index < 4 {
+                    barrier.wait();
+                }
+                thread::sleep(Duration::from_millis(5));
+                if index == 5 {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    return Err("busy".into());
+                }
+                Ok(())
+            },
+            |index| {
+                removed.lock().unwrap().push(index);
+                active.fetch_sub(1, Ordering::SeqCst);
+                if index == 7 {
+                    return Err("delete failed".into());
+                }
+                Ok(10)
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(history.estimated_bytes, 100);
+        assert_eq!(history.items[5].status, "skipped");
+        assert_eq!(history.items[7].status, "failed");
+        assert_eq!(
+            history
+                .items
+                .iter()
+                .filter(|i| i.status == "removed")
+                .count(),
+            10
+        );
+        let mut removed = removed.into_inner().unwrap();
+        removed.sort_unstable();
+        assert_eq!(removed, (0..12).filter(|i| *i != 5).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cleanup_audit_failure_prevents_unrecorded_deletion() {
+        for fail_at in [0, 1] {
+            let mut history = cleanup_history(1);
+            let writes = AtomicUsize::new(0);
+            cleanup_in_parallel(
+                &mut history,
+                |_| Ok(()),
+                |_| panic!("must persist the deletion intent before removing"),
+                |_| {
+                    if writes.fetch_add(1, Ordering::SeqCst) == fail_at {
+                        Err("disk full".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(history.status, "partial");
+            assert_eq!(history.items[0].status, "skipped");
+        }
+    }
+
+    #[test]
+    fn cleanup_audit_failure_stops_other_validated_workers() {
+        let mut history = cleanup_history(12);
+        let barrier = std::sync::Barrier::new(4);
+        let checks = AtomicUsize::new(0);
+        cleanup_in_parallel(
+            &mut history,
+            |_| {
+                checks.fetch_add(1, Ordering::SeqCst);
+                barrier.wait();
+                Ok(())
+            },
+            |_| panic!("audit failed before any deletion"),
+            |history| {
+                if history
+                    .items
+                    .iter()
+                    .any(|i| i.message.starts_with("正在处理"))
+                {
+                    Err("disk full".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 4);
+        assert_eq!(history.status, "partial");
+        assert_eq!(
+            history
+                .items
+                .iter()
+                .filter(|i| i.status == "skipped")
+                .count(),
+            4
+        );
+        assert_eq!(
+            history
+                .items
+                .iter()
+                .filter(|i| i.status == "pending")
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn cleanup_removes_disjoint_temporary_directories_with_persisted_audit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let store = Storage(root.join("audit"));
+        let identities = (0..8)
+            .map(|index| {
+                let path = root.join(index.to_string());
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(path.join("data"), b"test").unwrap();
+                safety::capture(&path).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut history = cleanup_history(identities.len());
+        store.record(&history).unwrap();
+        cleanup_in_parallel(
+            &mut history,
+            |index| safety::verify(&identities[index]),
+            |index| {
+                safety::remove(&identities[index], &format!("test-{index}"))?;
+                Ok(4)
+            },
+            |history| store.record(history),
+        );
+        assert!(identities.iter().all(|identity| !identity.path.exists()));
+        assert_eq!(history.estimated_bytes, 32);
+        let saved = store.history().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].items.iter().all(|item| item.status == "removed"));
+    }
+
+    #[test]
+    #[ignore = "manual cleanup benchmark; creates and deletes only temporary fixtures"]
+    fn benchmark_cleanup_batch() {
+        for parallel in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let store = Storage(root.join("audit"));
+            let identities = (0..24)
+                .map(|index| {
+                    let path = root.join(index.to_string());
+                    std::fs::create_dir(&path).unwrap();
+                    for file in 0..100 {
+                        std::fs::write(path.join(file.to_string()), b"test").unwrap();
+                    }
+                    safety::capture(&path).unwrap()
+                })
+                .collect::<Vec<_>>();
+            let check = |index: usize| {
+                safety::mount_paths()?;
+                safety::process_table()?;
+                safety::verify(&identities[index])?;
+                safety::path_idle(&identities[index].path).map_err(|error| error.reason)
+            };
+            let remove = |index: usize| {
+                safety::remove(&identities[index], &format!("bench-{index}"))?;
+                Ok(400)
+            };
+            let mut history = cleanup_history(identities.len());
+            let start = Instant::now();
+            store.record(&history).unwrap();
+            if parallel {
+                cleanup_in_parallel(&mut history, check, remove, |history| store.record(history));
+            } else {
+                for index in 0..identities.len() {
+                    history.items[index].status = "running".into();
+                    store.record(&history).unwrap();
+                    check(index).unwrap();
+                    history.items[index].message = "正在处理；若应用中断，请检查路径现状".into();
+                    store.record(&history).unwrap();
+                    history.estimated_bytes += remove(index).unwrap();
+                    history.items[index].status = "removed".into();
+                    store.record(&history).unwrap();
+                }
+            }
+            assert!(history.items.iter().all(|item| item.status == "removed"));
+            eprintln!(
+                "cleanup parallel={parallel}: {:?} (24 directories, 2400 files)",
+                start.elapsed()
+            );
+        }
+    }
 
     #[test]
     fn single_operation_guard_releases_on_drop() {

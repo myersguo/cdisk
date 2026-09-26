@@ -311,16 +311,28 @@ export default function App() {
   }
   async function clean() {
     if (!api.native || !preview || busy.current) return;
+    const pendingPreview = preview;
     busy.current = true; setOperation("clean"); setError("");
+    setPreview(null);
     try {
-      const entry = await api.call<HistoryEntry>("execute_cleanup", { token: preview.token });
+      const entry = await api.call<HistoryEntry>("execute_cleanup", { token: pendingPreview.token });
       setHistory(current => [entry, ...current.filter(h => h.id !== entry.id)]);
-      patch(currentMode, current => ({ ...emptyTask(), root: current.root }));
-      setView("history"); setPreview(null);
+      const removedPaths = new Set(entry.items.filter(item => item.status === "removed").map(item => item.path));
+      patch(currentMode, current => {
+        const candidates = current.candidates.filter(item => !removedPaths.has(item.path));
+        return {
+          ...current,
+          candidates,
+          report: current.report ? { ...current.report, candidates } : null,
+          selected: new Set([...current.selected].filter(id => candidates.some(item => item.id === id))),
+          activeId: candidates.some(item => item.id === current.activeId) ? current.activeId : candidates[0]?.id || "",
+        };
+      });
+      setView("history");
       if (entry.availableAfter !== null) setBoot(current => current ? {
         ...current, disk: { ...current.disk, availableBytes: entry.availableAfter! },
       } : current);
-    } catch (e) { setError(String(e)); setPreview(null); }
+    } catch (e) { setError(String(e)); }
     finally { setOperation(null); busy.current = false; }
   }
   async function save(protectPath?: string, removePath?: string) {
@@ -387,7 +399,7 @@ export default function App() {
           <small className="task-indicator">{tasks[section.id].state === "paused" ? t("task.paused") : tasks[section.id].state === "cancelling" ? t("task.cancelling") : t("task.scanning")}</small> : view === section.id && <i />}
       </button>)}</nav>
       <div className="sidebar-bottom"><LanguageSwitcher /><div className="local-note"><Icon name="shield" /><span>{t("nav.localOnly")}<br /><small>{t("nav.localNote")}</small></span></div></div>
-      <small className="version">CDisk 0.6.0</small>
+      <small className="version">CDisk 0.6.1</small>
     </aside>
     <main>
       <header className="page-header"><div><h1>{t(metadata.labelKey)}</h1><p>{t(metadata.detailKey)}</p></div>
@@ -399,6 +411,7 @@ export default function App() {
       {!api.native && <div className="banner demo">{t("banner.demo")}</div>}
       {error && <div className="banner error" role="alert">{localizeBackendText(error)}<button onClick={() => setError("")} aria-label={t("action.closeError")}><Icon name="close" /></button></div>}
       {notice && <div className="banner notice" role="status">{localizeBackendText(notice)}<button onClick={() => setNotice("")} aria-label={t("action.closeNotice")}><Icon name="close" /></button></div>}
+      {operation === "clean" && <div className="banner notice" role="status" aria-live="polite"><div className="spinner" />{t("confirm.cleaning")}</div>}
       {isScan(view) && task.error && <div className="banner error" role="alert">{localizeBackendText(task.error)}<button onClick={() => patch(currentMode, { error: "" })} aria-label={t("action.closeError")}><Icon name="close" /></button></div>}
       {isScan(view) && task.notice && <div className="banner notice" role="status">{task.notice}</div>}
       {operation === "prepare" && validation && <section className="validation-progress" aria-live="polite">
