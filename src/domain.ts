@@ -23,7 +23,8 @@ export type Report = {
   scannedEntries: number; unreadableEntries: number; skippedEntries: number;
   cancelled: boolean; truncated: boolean; elapsedMs: number; candidates: Candidate[];
 };
-export type Preview = { token: string; items: Candidate[]; estimatedBytes: number };
+export type AnalysisDirectory = { directory: Candidate; children: Candidate[]; truncated: boolean };
+export type Preview = { token: string; trash: boolean; items: Candidate[]; estimatedBytes: number };
 export type ValidationProgress = {
   scanId: string; completed: number; total: number; currentPath: string;
 };
@@ -99,7 +100,7 @@ export function dailyScope(items: Candidate[], selected: Set<DailyCategory>) {
 }
 export function applySettings(item: Candidate, settings: Settings): Candidate {
   const excludedBy = settings.excludedPaths.find(rule =>
-    item.path === rule || item.path.startsWith(`${rule}/`)) ?? null;
+    item.path === rule || item.path.startsWith(`${rule}/`) || rule.startsWith(`${item.path}/`)) ?? null;
   if (excludedBy) {
     return {
       ...item,

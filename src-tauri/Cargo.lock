@@ -284,9 +284,10 @@ dependencies = [
 
 [[package]]
 name = "cdisk"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "libc",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "tauri",

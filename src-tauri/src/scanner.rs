@@ -13,6 +13,22 @@ const OLD_LOG_SECONDS: u64 = 30 * 24 * 3600;
 const STALE_SECONDS: u64 = 7 * 24 * 3600;
 pub const MAX_RESULTS: usize = 500;
 
+pub(crate) fn sensitive_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    matches!(
+        name.as_str(),
+        ".git" | ".ssh" | ".aws" | ".gnupg" | ".env" | "id_rsa" | "id_ed25519"
+    ) || name.starts_with(".env.")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".p12")
+        || name.contains("keypair")
+}
+
 fn retain_largest(targets: &mut Vec<Target>, target: Target) -> bool {
     targets.push(target);
     if targets.len() <= MAX_RESULTS {
@@ -173,20 +189,7 @@ impl<F: FnMut(ScanProgress), C: FnMut(Target)> Walk<'_, F, C> {
         self.progress(path, false);
         let modified = u64::try_from(meta.mtime()).ok();
         result.latest = result.latest.max(modified);
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase();
-        if matches!(
-            name.as_str(),
-            ".git" | ".ssh" | ".aws" | ".gnupg" | ".env" | "id_rsa" | "id_ed25519"
-        ) || name.starts_with(".env.")
-            || name.ends_with(".pem")
-            || name.ends_with(".key")
-            || name.ends_with(".p12")
-            || name.contains("keypair")
-        {
+        if sensitive_path(path) {
             result.sensitive = true;
         }
         if !meta.is_dir() {
@@ -954,6 +957,9 @@ pub fn run<F: FnMut(ScanProgress), C: FnMut(Target)>(
     } else {
         home.into()
     };
+    if mode == ScanMode::Full {
+        return crate::analysis::run(id, &root, home, settings, cancel, (emit, record_target));
+    }
     let mounts = safety::mount_paths()?;
     let mut walk = Walk {
         id,
@@ -1064,70 +1070,7 @@ pub fn run<F: FnMut(ScanProgress), C: FnMut(Target)>(
                 );
             }
         }
-        ScanMode::Full => {
-            let entries =
-                fs::read_dir(&root).map_err(|e| format!("无法读取 {}：{e}", root.display()))?;
-            for entry in entries {
-                if walk.cancelled() {
-                    break;
-                }
-                let Ok(entry) = entry else {
-                    walk.errors += 1;
-                    continue;
-                };
-                let path = entry.path();
-                if walk.skip(&path, &root) {
-                    walk.skipped += 1;
-                    continue;
-                }
-                let meta = match fs::symlink_metadata(&path) {
-                    Ok(meta) if !meta.file_type().is_symlink() => meta,
-                    _ => {
-                        walk.skipped += 1;
-                        continue;
-                    }
-                };
-                walk.progress(&path, true);
-                let measurement = walk.measure(&path);
-                truncated |= walk.record(
-                    &mut targets,
-                    Target {
-                        item: Candidate {
-                            id: String::new(),
-                            title: entry.file_name().to_string_lossy().into_owned(),
-                            path: path.display().to_string(),
-                            category: if meta.is_dir() { "目录" } else { "文件" }.into(),
-                            description:
-                                "双击目录逐层下钻，或在 Finder 中查看。分析结果不等于可删除数据。"
-                                    .into(),
-                            bytes: measurement.bytes,
-                            entries: measurement.entries,
-                            modified_at: measurement.latest,
-                            is_dir: meta.is_dir(),
-                            cleanable: false,
-                            recommended: false,
-                            status: if measurement.complete {
-                                "locate"
-                            } else {
-                                "partial"
-                            }
-                            .into(),
-                            complete: measurement.complete,
-                            protection: None,
-                            excluded_by: None,
-                            reason: if measurement.complete {
-                                "只读分析，不提供自动删除"
-                            } else {
-                                "仅统计可读部分，容量是下限"
-                            }
-                            .into(),
-                        },
-                        identity: None,
-                        owner_patterns: vec![],
-                    },
-                );
-            }
-        }
+        ScanMode::Full => unreachable!("full analysis uses the retained tree"),
     }
     targets.sort_by(|a, b| {
         b.item
@@ -1172,6 +1115,9 @@ impl<'a> CleanupContext<'a> {
 }
 
 pub fn cleanup_precheck(target: &Target, home: &Path, settings: &Settings) -> Result<(), String> {
+    if matches!(target.item.category.as_str(), "文件" | "目录") {
+        return Err("磁盘分析项目只能移到废纸篓".into());
+    }
     if !target.item.cleanable || !target.item.complete {
         return Err(target.item.reason.clone());
     }
@@ -1183,6 +1129,48 @@ pub fn cleanup_precheck(target: &Target, home: &Path, settings: &Settings) -> Re
         safety::installer_unmounted(&identity.path)?;
     }
     Ok(())
+}
+
+pub fn analysis_precheck(target: &Target, home: &Path, settings: &Settings) -> Result<(), String> {
+    if !target.item.cleanable || !target.item.complete {
+        return Err(target.item.reason.clone());
+    }
+    let identity = target.identity.as_ref().ok_or("没有可清理的路径凭据")?;
+    safety::trash_protect(&identity.path, home, settings)?;
+    safety::verify(identity)?;
+    if is_installer(&identity.path) {
+        safety::installer_unmounted(&identity.path)?;
+    }
+    Ok(())
+}
+
+pub fn analysis_check(target: &Target, home: &Path, settings: &Settings) -> Result<(), String> {
+    analysis_precheck(target, home, settings)?;
+    let identity = target.identity.as_ref().ok_or("没有可清理的路径凭据")?;
+    let result = analysis_measure(&identity.path, settings)?;
+    if !result.complete || result.sensitive {
+        return Err("目录含敏感内容或扫描不完整，不能移到废纸篓".into());
+    }
+    safety::path_idle(&identity.path).map_err(|block| block.reason)
+}
+
+fn analysis_measure(path: &Path, settings: &Settings) -> Result<Measurement, String> {
+    let cancel = ScanControl::default();
+    let mut walker = Walk {
+        id: "trash-validation",
+        mode: ScanMode::Full,
+        cancel: &cancel,
+        emit: |_| {},
+        record_target: |_| {},
+        mounts: safety::mount_paths()?,
+        settings,
+        entries: 0,
+        errors: 0,
+        skipped: 0,
+        last_emit: Instant::now(),
+        next_id: 0,
+    };
+    Ok(walker.measure(path))
 }
 
 pub fn cleanup_check_with(target: &Target, context: &CleanupContext<'_>) -> Result<(), String> {
@@ -1226,7 +1214,26 @@ pub fn recheck(
     settings: &Settings,
 ) -> Result<Target, String> {
     if mode == ScanMode::Full {
-        return Err("磁盘分析结果只读，不改变删除权限".into());
+        let path = Path::new(&target.item.path);
+        safety::trash_protect(path, home, settings)?;
+        let measurement = analysis_measure(path, settings)?;
+        if !measurement.complete || measurement.sensitive {
+            return Err("目录含敏感内容或扫描不完整，不能移到废纸篓".into());
+        }
+        let mut updated = target.clone();
+        updated.identity = Some(safety::capture(path)?);
+        updated.item.cleanable = true;
+        updated.item.complete = true;
+        updated.item.bytes = measurement.bytes;
+        updated.item.entries = measurement.entries;
+        updated.item.modified_at = measurement.latest;
+        updated.item.status = "review".into();
+        updated.item.reason = "手动选择后移到废纸篓，可在 Finder 中恢复".into();
+        updated.item.protection = None;
+        updated.item.excluded_by = None;
+        analysis_precheck(&updated, home, settings)?;
+        safety::path_idle(path).map_err(|block| block.reason)?;
+        return Ok(updated);
     }
     let cancel = ScanControl::default();
     let mut walker = Walk {
@@ -1349,9 +1356,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.candidates.len(), 2);
+        assert_eq!(targets.len(), 4, "root and nested file remain in the tree");
         assert!(targets
             .iter()
-            .all(|t| !t.item.cleanable && t.identity.is_none()));
+            .filter(|target| target.item.id != crate::analysis::ROOT_ID)
+            .all(|t| t.item.cleanable && !t.item.recommended && t.identity.is_some()));
+        for target in targets
+            .iter()
+            .filter(|target| target.item.id != crate::analysis::ROOT_ID)
+        {
+            analysis_precheck(target, &home, &settings).unwrap();
+            assert!(
+                cleanup_check(target, &home, &settings).is_err(),
+                "analysis never grants permanent cleanup"
+            );
+        }
         let (nested, _) = run(
             "nested",
             ScanMode::Full,
@@ -1375,7 +1394,58 @@ mod tests {
         )
         .unwrap();
         assert!(cancelled.cancelled);
-        assert!(cancelled.candidates.iter().all(|item| !item.cleanable));
+        assert!(cancelled
+            .candidates
+            .iter()
+            .all(|item| !item.cleanable || item.complete));
+    }
+
+    #[test]
+    fn analysis_blocks_protected_content_and_revalidates_before_trashing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        fs::create_dir_all(home.join("Library/Messages")).unwrap();
+        fs::create_dir_all(home.join("repo/.git")).unwrap();
+        fs::create_dir(home.join("safe")).unwrap();
+        fs::write(home.join("safe/data"), b"keep").unwrap();
+        fs::write(home.join("secret.pem"), b"credential").unwrap();
+        let settings = Settings::default();
+        let (_, targets) = run(
+            "analysis",
+            ScanMode::Full,
+            (home.to_str(), &[]),
+            &home,
+            &settings,
+            &ScanControl::default(),
+            (|_| {}, |_| {}),
+        )
+        .unwrap();
+        let safe = targets
+            .iter()
+            .find(|target| target.item.title == "safe")
+            .unwrap();
+        for target in targets.iter().filter(|target| {
+            Path::new(&target.item.path).parent() == Some(home.as_path())
+                && target.item.title != "safe"
+        }) {
+            assert!(!target.item.cleanable);
+            assert!(analysis_precheck(target, &home, &settings).is_err());
+        }
+        analysis_check(safe, &home, &settings).unwrap();
+        let opened = fs::File::open(home.join("safe/data")).unwrap();
+        assert!(analysis_check(safe, &home, &settings).is_err());
+        drop(opened);
+        fs::write(home.join("safe/.env"), b"credential").unwrap();
+        assert!(analysis_check(safe, &home, &settings).is_err());
+        assert!(home.join("safe/data").exists());
+        fs::remove_file(home.join("safe/.env")).unwrap();
+        let protected = Settings {
+            excluded_paths: vec![home.join("safe/data").display().to_string()],
+            ..Default::default()
+        };
+        assert!(analysis_precheck(safe, &home, &protected).is_err());
+        let updated = recheck(safe, ScanMode::Full, &home, &settings).unwrap();
+        assert!(updated.item.cleanable && !updated.item.recommended);
     }
 
     #[test]

@@ -108,6 +108,14 @@ pub struct ScanReport {
     pub candidates: Vec<Candidate>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisDirectory {
+    pub directory: Candidate,
+    pub children: Vec<Candidate>,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
@@ -119,6 +127,7 @@ pub struct Settings {
 #[serde(rename_all = "camelCase")]
 pub struct CleanupPreview {
     pub token: String,
+    pub trash: bool,
     pub items: Vec<Candidate>,
     pub estimated_bytes: u64,
 }

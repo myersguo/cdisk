@@ -1,3 +1,4 @@
+mod analysis;
 mod models;
 mod safety;
 mod scanner;
@@ -19,11 +20,27 @@ struct Snapshot {
     id: String,
     mode: ScanMode,
     targets: HashMap<String, Target>,
+    children: HashMap<String, Vec<String>>,
+}
+
+impl Snapshot {
+    fn record(&mut self, target: Target) {
+        if self.mode == ScanMode::Full && !self.targets.contains_key(&target.item.id) {
+            if let Some(parent) = Path::new(&target.item.path).parent() {
+                self.children
+                    .entry(parent.display().to_string())
+                    .or_default()
+                    .push(target.item.id.clone());
+            }
+        }
+        self.targets.insert(target.item.id.clone(), target);
+    }
 }
 
 struct Plan {
     token: String,
     scan_id: String,
+    trash: bool,
     targets: Vec<Target>,
     created: Instant,
 }
@@ -203,6 +220,7 @@ async fn scan_disk(
                 id: scan_id.clone(),
                 mode,
                 targets: HashMap::new(),
+                children: HashMap::new(),
             },
         );
     tauri::async_runtime::spawn_blocking(move || {
@@ -227,8 +245,10 @@ async fn scan_disk(
                             .get_mut(&mode)
                             .filter(|snapshot| snapshot.id == snapshot_id)
                         {
-                            snapshot.targets.insert(target.item.id.clone(), target);
-                            if snapshot.targets.len() > scanner::MAX_RESULTS {
+                            snapshot.record(target);
+                            if mode != ScanMode::Full
+                                && snapshot.targets.len() > scanner::MAX_RESULTS
+                            {
                                 if let Some(remove) = snapshot
                                     .targets
                                     .values()
@@ -248,22 +268,25 @@ async fn scan_disk(
                 },
             ),
         )?;
+        if mode == ScanMode::Full {
+            // All final tree nodes have already been published into the active snapshot.
+            return Ok(report);
+        }
+        let mut snapshot = Snapshot {
+            id: scan_id,
+            mode,
+            targets: HashMap::new(),
+            children: HashMap::new(),
+        };
+        for target in targets {
+            snapshot.record(target);
+        }
         state
             .data
             .lock()
             .map_err(|_| "状态不可用")?
             .snapshots
-            .insert(
-                mode,
-                Snapshot {
-                    id: scan_id,
-                    mode,
-                    targets: targets
-                        .into_iter()
-                        .map(|t| (t.item.id.clone(), t))
-                        .collect(),
-                },
-            );
+            .insert(mode, snapshot);
         Ok(report)
     })
     .await
@@ -310,6 +333,72 @@ fn scan_candidates(
 }
 
 #[tauri::command]
+fn analysis_directory(
+    state: tauri::State<'_, Arc<State>>,
+    scan_id: String,
+    candidate_id: Option<String>,
+    prioritize: bool,
+) -> Result<Option<AnalysisDirectory>, String> {
+    analysis_items(&state, &scan_id, candidate_id.as_deref(), prioritize)
+}
+
+fn analysis_items(
+    state: &State,
+    scan_id: &str,
+    candidate_id: Option<&str>,
+    prioritize: bool,
+) -> Result<Option<AnalysisDirectory>, String> {
+    validate_id(scan_id)?;
+    if let Some(id) = candidate_id {
+        validate_candidate_id(id)?;
+    }
+    let id = candidate_id.unwrap_or(analysis::ROOT_ID);
+    let data = state.data.lock().map_err(|_| "状态不可用")?;
+    let snapshot = data
+        .snapshots
+        .get(&ScanMode::Full)
+        .filter(|s| s.id == scan_id)
+        .ok_or("扫描已失效")?;
+    if snapshot.targets.is_empty() {
+        return Ok(None);
+    }
+    let directory = snapshot
+        .targets
+        .get(id)
+        .filter(|t| t.item.is_dir)
+        .ok_or("目录尚未发现")?;
+    if let Some((_, control)) = data.scans.get(&ScanMode::Full).filter(|_| prioritize) {
+        control.prioritize(id.into());
+    }
+    let (children, truncated) = analysis_children(snapshot, &directory.item.path);
+    Ok(Some(AnalysisDirectory {
+        directory: directory.item.clone(),
+        children,
+        truncated,
+    }))
+}
+
+fn analysis_children(snapshot: &Snapshot, path: &str) -> (Vec<Candidate>, bool) {
+    let mut children: Vec<&Candidate> = snapshot
+        .children
+        .get(path)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| snapshot.targets.get(id).map(|t| &t.item))
+        .collect();
+    // ponytail: return the largest 500 children per column; use pagination/virtualization for larger lists.
+    let truncated = children.len() > scanner::MAX_RESULTS;
+    if truncated {
+        children.select_nth_unstable_by(scanner::MAX_RESULTS, |a, b| {
+            b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path))
+        });
+        children.truncate(scanner::MAX_RESULTS);
+    }
+    children.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path)));
+    (children.into_iter().cloned().collect(), truncated)
+}
+
+#[tauri::command]
 fn save_settings(
     state: tauri::State<'_, Arc<State>>,
     store: tauri::State<'_, Storage>,
@@ -337,9 +426,6 @@ fn persist_settings(
     let mut data = state.data.lock().map_err(|_| "状态不可用")?;
     data.pending = None;
     for snapshot in data.snapshots.values_mut() {
-        if snapshot.mode == ScanMode::Full {
-            continue;
-        }
         for target in snapshot.targets.values_mut() {
             apply_settings_to_target(target, &settings);
         }
@@ -352,7 +438,7 @@ fn apply_settings_to_target(target: &mut Target, settings: &Settings) {
     let excluded_by = settings
         .excluded_paths
         .iter()
-        .find(|rule| path.starts_with(rule))
+        .find(|rule| path.starts_with(rule) || Path::new(rule).starts_with(path))
         .cloned();
     if let Some(rule) = excluded_by {
         target.item.cleanable = false;
@@ -386,6 +472,9 @@ fn choose_targets(snapshot: &Snapshot, ids: &[String]) -> Result<Vec<Target>, St
             continue;
         }
         let target = snapshot.targets.get(id).ok_or("候选项不存在，请重新扫描")?;
+        if snapshot.mode == ScanMode::Full && id == analysis::ROOT_ID {
+            return Err("请选择目录内的项目".into());
+        }
         if !target.item.cleanable || !target.item.complete {
             return Err(format!("{}：{}", target.item.title, target.item.reason));
         }
@@ -409,12 +498,35 @@ fn choose_targets(snapshot: &Snapshot, ids: &[String]) -> Result<Vec<Target>, St
 fn remove_cleaned_targets(snapshot: &mut Snapshot, outcomes: &[ItemOutcome]) {
     let removed_paths = outcomes
         .iter()
-        .filter(|item| item.status == "removed")
+        .filter(|item| matches!(item.status.as_str(), "removed" | "trashed"))
         .map(|item| item.path.as_str())
         .collect::<HashSet<_>>();
-    snapshot
+    let removed = snapshot
         .targets
-        .retain(|_, target| !removed_paths.contains(target.item.path.as_str()));
+        .values()
+        .filter(|target| removed_paths.contains(target.item.path.as_str()))
+        .map(|target| target.item.clone())
+        .collect::<Vec<_>>();
+    for target in snapshot.targets.values_mut() {
+        for item in &removed {
+            if Path::new(&item.path).starts_with(&target.item.path) && item.path != target.item.path
+            {
+                target.item.bytes = target.item.bytes.saturating_sub(item.bytes);
+                target.item.entries = target.item.entries.saturating_sub(item.entries);
+            }
+        }
+    }
+    snapshot.targets.retain(|_, target| {
+        !removed_paths
+            .iter()
+            .any(|path| Path::new(&target.item.path).starts_with(path))
+    });
+    snapshot.children.retain(|path, ids| {
+        ids.retain(|id| snapshot.targets.contains_key(id));
+        !removed_paths
+            .iter()
+            .any(|removed| Path::new(path).starts_with(removed))
+    });
 }
 
 fn choose_snapshot_targets(
@@ -441,6 +553,13 @@ fn snapshot_items(state: &State, scan_id: &str) -> Result<Vec<Candidate>, String
         .values()
         .find(|snapshot| snapshot.id == scan_id)
         .ok_or("扫描已失效")?;
+    if snapshot.mode == ScanMode::Full {
+        let root = snapshot
+            .targets
+            .get(analysis::ROOT_ID)
+            .ok_or("目录尚未发现")?;
+        return Ok(analysis_children(snapshot, &root.item.path).0);
+    }
     Ok(snapshot
         .targets
         .values()
@@ -594,6 +713,13 @@ async fn prepare_cleanup(
     let (guard, control) = begin_preparation(&state, &preparation_id)?;
     state.data.lock().map_err(|_| "状态不可用")?.pending = None;
     let targets = choose_snapshot_targets(&state, &scan_id, &candidate_ids)?;
+    let trash = state
+        .data
+        .lock()
+        .map_err(|_| "状态不可用")?
+        .snapshots
+        .values()
+        .any(|snapshot| snapshot.id == scan_id && snapshot.mode == ScanMode::Full);
     let settings = store.settings()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
@@ -602,7 +728,13 @@ async fn prepare_cleanup(
         validate_in_parallel(
             &targets,
             &control,
-            |target| scanner::cleanup_precheck(target, &home, &settings),
+            |target| {
+                if trash {
+                    scanner::analysis_precheck(target, &home, &settings)
+                } else {
+                    scanner::cleanup_precheck(target, &home, &settings)
+                }
+            },
             |index, completed, _| {
                 let _ = window.emit(
                     "cleanup-validation-progress",
@@ -636,6 +768,7 @@ async fn prepare_cleanup(
         );
         let preview = CleanupPreview {
             token: token.clone(),
+            trash,
             estimated_bytes: targets.iter().map(|t| t.item.bytes).sum(),
             items: targets.iter().map(|t| t.item.clone()).collect(),
         };
@@ -646,6 +779,7 @@ async fn prepare_cleanup(
         data.pending = Some(Plan {
             token,
             scan_id,
+            trash,
             targets,
             created: Instant::now(),
         });
@@ -813,16 +947,32 @@ async fn execute_cleanup(
         store.record(&history)?; // Fail before deleting if the audit record cannot be persisted.
         cleanup_in_parallel(
             &mut history,
-            |index| scanner::cleanup_check(&plan.targets[index], &home, &settings),
+            |index| {
+                if plan.trash {
+                    scanner::analysis_check(&plan.targets[index], &home, &settings)
+                } else {
+                    scanner::cleanup_check(&plan.targets[index], &home, &settings)
+                }
+            },
             |index| {
                 let target = &plan.targets[index];
-                safety::remove(
-                    target.identity.as_ref().ok_or("缺少路径身份")?,
-                    &format!("{}-{index}", plan.token),
-                )?;
+                let identity = target.identity.as_ref().ok_or("缺少路径身份")?;
+                if plan.trash {
+                    safety::trash(identity)?;
+                } else {
+                    safety::remove(identity, &format!("{}-{index}", plan.token))?;
+                }
                 Ok(target.item.bytes)
             },
-            |history| store.record(history),
+            |history| {
+                if plan.trash {
+                    let mut entry = history.clone();
+                    mark_trashed(&mut entry);
+                    store.record(&entry)
+                } else {
+                    store.record(history)
+                }
+            },
         );
         if history.status == "running" {
             history.status = if history.items.iter().all(|i| i.status == "removed") {
@@ -831,6 +981,9 @@ async fn execute_cleanup(
                 "partial"
             }
             .into();
+        }
+        if plan.trash {
+            mark_trashed(&mut history);
         }
         history.available_after = scanner::disk().ok().map(|d| d.available_bytes);
         if let Err(error) = store.record(&history) {
@@ -850,6 +1003,19 @@ async fn execute_cleanup(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn mark_trashed(history: &mut HistoryEntry) {
+    for item in &mut history.items {
+        if item.status == "removed" {
+            item.status = "trashed".into();
+            item.message = item.message.replacen(
+                "已永久清理",
+                "已移到废纸篓，可在 Finder 中恢复；空间尚未释放",
+                1,
+            );
+        }
+    }
 }
 
 #[tauri::command]
@@ -902,6 +1068,7 @@ pub fn run() {
             pause_scan,
             resume_scan,
             scan_candidates,
+            analysis_directory,
             recheck_item,
             save_settings,
             prepare_cleanup,
@@ -916,6 +1083,173 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_analysis_can_browse_prioritize_and_reuse_a_single_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(temp.path()).unwrap();
+        for name in ["a", "b"] {
+            std::fs::create_dir(home.join(name)).unwrap();
+            std::fs::write(home.join(name).join("file"), b"cached bytes").unwrap();
+        }
+        let state = Arc::new(State::default());
+        let (guard, control) = begin_scan(&state, ScanMode::Full, "live-tree").unwrap();
+        state.data.lock().unwrap().snapshots.insert(
+            ScanMode::Full,
+            Snapshot {
+                id: "live-tree".into(),
+                mode: ScanMode::Full,
+                targets: HashMap::new(),
+                children: HashMap::new(),
+            },
+        );
+        let (ready, wait) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker_control = Arc::clone(&control);
+        let worker_home = home.clone();
+        let worker = thread::spawn(move || {
+            let _guard = guard;
+            let paused = AtomicBool::new(false);
+            scanner::run(
+                "live-tree",
+                ScanMode::Full,
+                (worker_home.to_str(), &[]),
+                &worker_home,
+                &Settings::default(),
+                &worker_control,
+                (
+                    |_| {
+                        if worker_state.data.lock().unwrap().snapshots[&ScanMode::Full]
+                            .targets
+                            .len()
+                            >= 3
+                            && !paused.swap(true, Ordering::Relaxed)
+                        {
+                            worker_control.pause();
+                            ready.send(()).unwrap();
+                        }
+                    },
+                    |target| {
+                        worker_state
+                            .data
+                            .lock()
+                            .unwrap()
+                            .snapshots
+                            .get_mut(&ScanMode::Full)
+                            .unwrap()
+                            .record(target);
+                    },
+                ),
+            )
+            .unwrap()
+        });
+        wait.recv_timeout(Duration::from_secs(3)).unwrap();
+        let root = analysis_items(&state, "live-tree", None, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.children.len(), 2);
+        assert!(root
+            .children
+            .iter()
+            .all(|item| !item.complete && !item.cleanable));
+        let priority = root
+            .children
+            .iter()
+            .max_by_key(|item| item.id.clone())
+            .unwrap();
+        let directory = analysis_items(&state, "live-tree", Some(&priority.id), true)
+            .unwrap()
+            .unwrap();
+        assert!(directory.children.is_empty());
+        assert!(analysis_items(&state, "different-tree", None, false).is_err());
+        assert!(analysis_items(&state, "live-tree", Some("unknown"), false).is_err());
+        control.resume();
+        let (_, targets) = worker.join().unwrap();
+        let first_file = targets
+            .iter()
+            .find(|target| target.item.id == "item-3")
+            .unwrap();
+        assert_eq!(
+            Path::new(&first_file.item.path).parent(),
+            Some(Path::new(&priority.path)),
+            "the selected directory is enumerated first"
+        );
+        let directory = analysis_items(&state, "live-tree", Some(&priority.id), false)
+            .unwrap()
+            .unwrap();
+        assert!(directory.directory.complete);
+        assert_eq!(directory.children.len(), 1);
+        let file = &directory.children[0];
+        std::fs::remove_file(&file.path).unwrap();
+        let cached = analysis_items(&state, "live-tree", Some(&priority.id), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cached.children[0].bytes, file.bytes,
+            "navigation reads only the retained tree"
+        );
+        assert!(choose_snapshot_targets(&state, "live-tree", &[analysis::ROOT_ID.into()]).is_err());
+        let mut data = state.data.lock().unwrap();
+        let snapshot = data.snapshots.get_mut(&ScanMode::Full).unwrap();
+        let before = snapshot.targets[analysis::ROOT_ID].item.bytes;
+        remove_cleaned_targets(
+            snapshot,
+            &[ItemOutcome {
+                title: priority.title.clone(),
+                path: priority.path.clone(),
+                status: "trashed".into(),
+                message: String::new(),
+            }],
+        );
+        assert!(
+            !snapshot.targets.contains_key(&file.id),
+            "removing a directory also drops descendants"
+        );
+        assert_eq!(
+            analysis_children(snapshot, &home.display().to_string())
+                .0
+                .len(),
+            1
+        );
+        assert_eq!(
+            snapshot.targets[analysis::ROOT_ID].item.bytes,
+            before.saturating_sub(directory.directory.bytes)
+        );
+    }
+
+    #[test]
+    fn analysis_columns_bound_payloads_without_discarding_tree_nodes() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(temp.path()).unwrap();
+        for index in 0..=scanner::MAX_RESULTS {
+            std::fs::write(home.join(format!("file-{index:04}")), b"fixture").unwrap();
+        }
+        let (report, targets) = scanner::run(
+            "large-tree",
+            ScanMode::Full,
+            (home.to_str(), &[]),
+            &home,
+            &Settings::default(),
+            &ScanControl::default(),
+            (|_| {}, |_| {}),
+        )
+        .unwrap();
+        assert!(report.truncated);
+        let mut snapshot = Snapshot {
+            id: "large-tree".into(),
+            mode: ScanMode::Full,
+            targets: HashMap::new(),
+            children: HashMap::new(),
+        };
+        for target in targets {
+            snapshot.record(target);
+        }
+        assert_eq!(snapshot.targets.len(), scanner::MAX_RESULTS + 2);
+        let (children, truncated) = analysis_children(&snapshot, &home.display().to_string());
+        assert!(truncated);
+        assert_eq!(children.len(), scanner::MAX_RESULTS);
+        assert!(children.iter().all(|item| item.complete));
+    }
 
     fn cleanup_history(count: usize) -> HistoryEntry {
         HistoryEntry {
@@ -934,6 +1268,23 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn trash_history_keeps_failures_and_audit_diagnostics() {
+        let mut history = cleanup_history(3);
+        history.items[0].status = "removed".into();
+        history.items[0].message = "已永久清理；记录保存失败，已停止：disk full".into();
+        history.items[1].status = "skipped".into();
+        history.items[1].message = "busy".into();
+        history.items[2].status = "failed".into();
+        mark_trashed(&mut history);
+        assert_eq!(history.items[0].status, "trashed");
+        assert!(history.items[0].message.contains("空间尚未释放"));
+        assert!(history.items[0].message.contains("disk full"));
+        assert_eq!(history.items[1].status, "skipped");
+        assert_eq!(history.items[1].message, "busy");
+        assert_eq!(history.items[2].status, "failed");
     }
 
     #[test]
@@ -1156,6 +1507,7 @@ mod tests {
         state.data.lock().unwrap().pending = Some(Plan {
             token: "stale".into(),
             scan_id: "scan".into(),
+            trash: false,
             targets: vec![],
             created: Instant::now(),
         });
@@ -1296,11 +1648,13 @@ mod tests {
                     id: "quick-result".into(),
                     mode: ScanMode::Quick,
                     targets: HashMap::new(),
+                    children: HashMap::new(),
                 },
             );
             data.pending = Some(Plan {
                 token: "plan".into(),
                 scan_id: "quick-result".into(),
+                trash: false,
                 targets: vec![],
                 created: Instant::now(),
             });
@@ -1342,6 +1696,7 @@ mod tests {
             id: "scan".into(),
             mode: ScanMode::Quick,
             targets: HashMap::new(),
+            children: HashMap::new(),
         };
         assert!(choose_targets(&snapshot, &[]).is_err());
         assert!(choose_targets(&snapshot, &["unknown".into()]).is_err());
@@ -1386,6 +1741,7 @@ mod tests {
         let mut snapshot = Snapshot {
             id: "test".into(),
             mode: ScanMode::Quick,
+            children: HashMap::new(),
             targets: HashMap::from([
                 ("a".into(), target("a", &first)),
                 ("b".into(), target("b", &nested)),
@@ -1400,6 +1756,20 @@ mod tests {
         assert!(choose_targets(&snapshot, &["a".into(), "b".into()]).is_err());
         snapshot.targets.get_mut("a").unwrap().item.cleanable = false;
         assert!(choose_targets(&snapshot, &["a".into()]).is_err());
+        remove_cleaned_targets(
+            &mut snapshot,
+            &[ItemOutcome {
+                title: "b".into(),
+                path: nested.display().to_string(),
+                status: "trashed".into(),
+                message: String::new(),
+            }],
+        );
+        assert_eq!(snapshot.id, "test");
+        assert_eq!(snapshot.targets.len(), 1);
+        snapshot.targets.get_mut("a").unwrap().item.cleanable = true;
+        assert!(choose_targets(&snapshot, &["a".into()]).is_ok());
+        assert!(choose_targets(&snapshot, &["b".into()]).is_err());
     }
 
     #[test]
@@ -1412,6 +1782,7 @@ mod tests {
                 id: "live-projects".into(),
                 mode: ScanMode::Projects,
                 targets: HashMap::new(),
+                children: HashMap::new(),
             },
         );
         let temp = tempfile::tempdir().unwrap();
@@ -1494,6 +1865,7 @@ mod tests {
             Snapshot {
                 id: "keep".into(),
                 mode: ScanMode::Quick,
+                children: HashMap::new(),
                 targets: HashMap::from([("item-0".into(), target)]),
             },
         );
@@ -1502,7 +1874,7 @@ mod tests {
             &state,
             &store,
             Settings {
-                excluded_paths: vec![cache.display().to_string()],
+                excluded_paths: vec![cache.join("keep").display().to_string()],
                 ..Default::default()
             },
         );

@@ -1,11 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Bootstrap, Candidate, Progress, DailyCategory, Report, ScanMode, Settings, SettingsUpdate, ValidationProgress } from "./domain";
+import type { AnalysisDirectory, Bootstrap, Candidate, Progress, DailyCategory, Report, ScanMode, Settings, SettingsUpdate, ValidationProgress } from "./domain";
 
 export const native = "__TAURI_INTERNALS__" in window;
 const home = "/Users/demo";
 const disk = { totalBytes: 494384795648, availableBytes: 78383153152 };
 let previewSettings: Settings = { projectRoots: [], excludedPaths: [] };
+const demoTree = new Map<string, AnalysisDirectory>();
+let demoTreeScanId = "";
+export async function analysisDirectory(scanId: string, candidateId: string | null, prioritize = true): Promise<AnalysisDirectory | null> {
+  if (native) return call("analysis_directory", { scanId, candidateId, prioritize });
+  if (scanId !== demoTreeScanId) return null;
+  return demoTree.get(candidateId || "analysis-root") ?? null;
+}
 export const call = <T,>(command: string, args?: Record<string, unknown>) => invoke<T>(command, args);
 export const onProgress = (callback: (p: Progress) => void) =>
   native ? listen<Progress>("scan-progress", event => callback(event.payload)) : Promise.resolve(() => {});
@@ -49,10 +56,33 @@ function item(title: string, path: string, size: number, category: string, statu
   };
 }
 export type DemoControl = { paused: boolean; cancelled: boolean };
+function demoAnalysis(root: string) {
+  demoTree.clear();
+  let nextId = 0;
+  const create = (path: string, depth: number): Candidate => {
+    const name = path.split("/").at(-1) || "/";
+    const index = nextId++;
+    const candidate = { ...item(name, path, 0, "目录", "review", index),
+      id: depth === 0 ? "analysis-root" : `item-${index}`, isDir: depth < 4,
+      cleanable: false, recommended: false, complete: false, status: "partial",
+      description: "点击目录在右侧展开子项；手动选择不需要的内容并移到废纸篓。",
+      reason: "目录含敏感内容或扫描不完整，不能移到废纸篓",
+    };
+    if (candidate.isDir) {
+      const children = ["Library", "repos", "Documents", "Downloads", "Movies", "Pictures", ".cache"]
+        .map((name, i) => ({ ...create(`${path}/${name}`, depth + 1), bytes: [48, 31, 18, 5, 2, 1, .3][i] * 1024 ** 3 }));
+      demoTree.set(candidate.id, { directory: candidate, children, truncated: false });
+    }
+    return candidate;
+  };
+  create(root, 0);
+  return demoTree.get("analysis-root")!.children;
+}
 export async function scan(mode: ScanMode, scanId: string, root: string | null, dailyCategories: DailyCategory[],
   control: DemoControl, progress: (p: Progress) => void): Promise<Report> {
   if (native) return call("scan_disk", { mode, scanId, root, dailyCategories });
   const base = root || home;
+  if (mode === "full") demoTreeScanId = scanId;
   if (mode === "quick" && !dailyCategories.length) throw new Error("请至少选择一个清理类别");
   const candidates = mode === "quick" ? fixtures.filter(f => dailyCategories.includes(f[5]))
     .map((f, i) => item(f[0], `${home}/${f[1]}`, f[2], f[3], f[4], i)) :
@@ -60,19 +90,30 @@ export async function scan(mode: ScanMode, scanId: string, root: string | null, 
       `${home}/repos/project-${i + 1}/target`, 4.8 - i * 0.17, "项目产物", i % 3 === 0 ? "review" : "ready", i)) :
     mode === "installers" ? ["Editor.dmg", "Design.dmg", "Tools.dmg"].map((name, i) =>
       item(name, `${home}/Downloads/${name}`, 1.8 - i * 0.6, "安装包", i === 0 ? "mounted" : "review", i)) :
-    ["Library", "repos", "Documents", "Downloads", "Movies", "Pictures", ".cache"].map((name, i) =>
-      item(name, `${base}/${name}`, [48, 31, 18, 5, 2, 1, .3][i], "目录", "locate", i));
+    demoAnalysis(base);
   const completed: Candidate[] = [];
   for (const candidate of candidates) {
     await new Promise(resolve => setTimeout(resolve, 180));
     while (control.paused && !control.cancelled) await new Promise(resolve => setTimeout(resolve, 30));
     if (control.cancelled) break;
+    if (mode === "full") {
+      const complete = (item: Candidate) => {
+        item.complete = true;
+        item.cleanable = item.path.startsWith(`${home}/`) && !item.path.split("/").some(name => ["Library", "repos"].includes(name));
+        item.status = item.cleanable ? "review" : "protected";
+        item.reason = item.cleanable ? "手动选择后移到废纸篓，可在 Finder 中恢复" : "路径包含受保护内容，不能移到废纸篓";
+        const directory = demoTree.get(item.id);
+        if (directory) { Object.assign(directory.directory, item); directory.children.forEach(complete); }
+      };
+      complete(candidate);
+    }
     completed.push(candidate);
-    progress({ scanId, mode, currentPath: candidate.path, scannedEntries: completed.length * 3231, unreadableEntries: 0, candidate });
+    progress({ scanId, mode, currentPath: candidate.path, scannedEntries: completed.length * 3231, unreadableEntries: 0, candidate: mode === "full" ? null : candidate });
   }
+  if (mode === "full") demoTree.get("analysis-root")!.directory.complete = !control.cancelled;
   return { scanId, mode, root: base, parent: base.slice(0, base.lastIndexOf("/")) || null, disk,
     scannedEntries: completed.length * 3231, unreadableEntries: 0, skippedEntries: 3, elapsedMs: completed.length * 180,
-    cancelled: control.cancelled, truncated: false, candidates: completed };
+    cancelled: control.cancelled, truncated: false, candidates: mode === "full" ? candidates : completed };
 }
 
 export async function recheck(scanId: string, candidate: Candidate, removeManualProtection: boolean): Promise<Candidate> {

@@ -342,15 +342,33 @@ pub fn excluded(path: &Path, settings: &Settings) -> bool {
     settings.excluded_paths.iter().any(|p| path.starts_with(p))
 }
 
+const SENSITIVE_PATHS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".config",
+    ".codex",
+    ".claude",
+    "Library/Keychains",
+    "Library/Mobile Documents",
+    "Library/CloudStorage",
+    "Library/Messages",
+    "Library/Mail",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Application Support",
+    "Library/LaunchAgents",
+];
+
 pub fn protect(path: &Path, home: &Path, settings: &Settings) -> Result<(), String> {
     let volume_trash = path.starts_with("/Volumes")
         && path
             .components()
             .any(|component| component.as_os_str() == ".Trashes");
-    let user_temp = fs::canonicalize(std::env::temp_dir()).ok();
-    let temporary = user_temp
-        .as_ref()
-        .is_some_and(|directory| path.starts_with(directory) && path != directory);
+    let temporary = !path.starts_with(home)
+        && fs::canonicalize(std::env::temp_dir())
+            .ok()
+            .is_some_and(|directory| path.starts_with(&directory) && path != directory);
     if !plain_path(path) || path == home || (!path.starts_with(home) && !volume_trash && !temporary)
     {
         return Err("系统目录、其他用户数据或用户主目录受保护".into());
@@ -358,29 +376,52 @@ pub fn protect(path: &Path, home: &Path, settings: &Settings) -> Result<(), Stri
     if excluded(path, settings) {
         return Err("已加入保护名单".into());
     }
-    let sensitive = [
-        ".ssh",
-        ".gnupg",
-        ".aws",
-        ".config",
-        ".codex",
-        ".claude",
-        "Library/Keychains",
-        "Library/Mobile Documents",
-        "Library/CloudStorage",
-        "Library/Messages",
-        "Library/Mail",
-        "Library/Containers",
-        "Library/Group Containers",
-        "Library/Application Support",
-        "Library/LaunchAgents",
-    ];
-    if sensitive.iter().any(|p| path.starts_with(home.join(p)))
+    if SENSITIVE_PATHS
+        .iter()
+        .any(|p| path.starts_with(home.join(p)))
         || path.components().any(|p| p.as_os_str() == ".git")
     {
         return Err("账户、会话、凭证或应用数据受保护".into());
     }
     Ok(())
+}
+
+pub fn trash_protect(path: &Path, home: &Path, settings: &Settings) -> Result<(), String> {
+    protect(path, home, settings)?;
+    if !path.starts_with(home)
+        || path.starts_with(home.join(".Trash"))
+        || SENSITIVE_PATHS
+            .iter()
+            .any(|p| home.join(p).starts_with(path))
+        || settings
+            .excluded_paths
+            .iter()
+            .any(|p| Path::new(p).starts_with(path))
+    {
+        return Err("路径包含受保护内容，不能移到废纸篓".into());
+    }
+    Ok(())
+}
+
+pub fn trash(identity: &Identity) -> Result<PathBuf, String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    if mount_paths()?
+        .iter()
+        .any(|mount| mount.starts_with(&identity.path))
+    {
+        return Err("目标包含挂载点".into());
+    }
+    let path = identity.path.to_str().ok_or("路径不是有效的 UTF-8")?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    let mut destination = None;
+    verify(identity)?;
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut destination))
+        .map_err(|error| format!("移到废纸篓失败：{error}"))?;
+    destination
+        .and_then(|url| url.path())
+        .map(|path| PathBuf::from(path.to_string()))
+        .ok_or_else(|| "已移到废纸篓，但无法读取目标位置，请在 Finder 中检查".into())
 }
 
 pub fn project_proof(path: &Path) -> Result<(), String> {
@@ -645,6 +686,70 @@ pub fn remove(identity: &Identity, ticket: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_protection_covers_sensitive_ancestors_exclusions_and_user_scope() {
+        let home = Path::new("/Users/example");
+        let settings = Settings {
+            excluded_paths: vec!["/Users/example/Documents/keep".into()],
+            ..Default::default()
+        };
+        for path in [
+            home.to_path_buf(),
+            home.join("Library"),
+            home.join(".ssh"),
+            home.join("Documents"),
+            home.join(".Trash/item"),
+            PathBuf::from("/System/cache"),
+            PathBuf::from("/Users/another/file"),
+        ] {
+            assert!(
+                trash_protect(&path, home, &settings).is_err(),
+                "{}",
+                path.display()
+            );
+        }
+        trash_protect(&home.join("Downloads/video.mp4"), home, &settings).unwrap();
+    }
+
+    #[test]
+    fn native_trash_moves_only_the_fixture_and_can_be_restored() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let path = root.join(format!(
+            "cdisk-trash-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("data.txt"), b"recoverable").unwrap();
+        let identity = capture(&path).unwrap();
+        let destination = trash(&identity).unwrap();
+        // Restore the fixture immediately; never inspect or remove other Trash items.
+        let content = fs::read(destination.join("data.txt"));
+        fs::rename(&destination, &path).unwrap();
+        assert_eq!(content.unwrap(), b"recoverable");
+        assert!(destination
+            .components()
+            .any(|part| matches!(part.as_os_str().to_str(), Some(".Trash" | ".Trashes"))));
+        verify(&identity).unwrap();
+    }
+
+    #[test]
+    fn trash_refuses_replaced_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let path = root.join("data");
+        fs::write(&path, b"original").unwrap();
+        let identity = capture(&path).unwrap();
+        fs::rename(&path, root.join("original")).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        assert!(trash(&identity).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"replacement");
+    }
     use std::os::unix::fs::symlink;
 
     #[test]

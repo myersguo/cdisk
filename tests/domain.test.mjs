@@ -79,6 +79,8 @@ test("settings update existing candidates without discarding the result list", (
   const needsRecheck = applySettings(protectedItem, { projectRoots: [], excludedPaths: [] });
   assert.equal(needsRecheck.protection, "unknown");
   assert.equal(needsRecheck.cleanable, false);
+  const containsProtectedItem = applySettings(items[0], { projectRoots: [], excludedPaths: ["/Users/demo/cache/keep"] });
+  assert.equal(containsProtectedItem.cleanable, false);
 });
 
 test("protection labels distinguish user rules from mount and runtime safety", () => {

@@ -4,6 +4,7 @@ use std::sync::{Condvar, Mutex};
 struct Flags {
     paused: bool,
     cancelled: bool,
+    priority: Option<String>,
 }
 
 /// Cooperative control: no thread is suspended while holding filesystem/state locks.
@@ -14,6 +15,16 @@ pub struct ScanControl {
 }
 
 impl ScanControl {
+    pub fn prioritize(&self, id: String) {
+        if let Ok(mut flags) = self.flags.lock() {
+            flags.priority = Some(id);
+        }
+    }
+
+    pub fn take_priority(&self) -> Option<String> {
+        self.flags.lock().ok()?.priority.take()
+    }
+
     pub fn checkpoint(&self) -> bool {
         let Ok(mut flags) = self.flags.lock() else {
             return false;

@@ -1,4 +1,13 @@
 export const en = {
+  "trash.action": "Move to Trash",
+  "trash.summary": "Move {count} selected items (about {size}) to Trash. You can restore them in Finder. Space is freed only after emptying Trash.",
+  "trash.progress": "Moving to Trash…",
+  "trash.done": "Moved to Trash",
+  "trash.size": "scanned usage moved",
+  "trash.caveat": "Items can be restored in Finder. Moving to Trash does not free disk space.",
+  "trash.description": "Click folders to expand the next column. Manually select unwanted items to move to Trash.",
+  "trash.review": "Select manually to move to Trash; recoverable in Finder.",
+  "trash.blocked": "Protected content or an incomplete scan prevents moving this item to Trash.",
   "brand.tagline": "Make room, with care",
   "nav.label": "CDisk navigation",
   "nav.quick": "Daily cleanup",
@@ -31,7 +40,7 @@ export const en = {
   "nav.installers": "Installers",
   "nav.installersDetail": "Find DMG, PKG, XIP, and ISO files without treating ordinary ZIP files as junk.",
   "nav.full": "Disk analysis",
-  "nav.fullDetail": "Drill into large folders to see where space went. Analysis is read-only.",
+  "nav.fullDetail": "Explore disk usage and manually move unwanted items to Trash.",
   "nav.history": "Activity",
   "nav.historyDetail": "Review cleanup outcomes, skipped items, and actual disk-space changes.",
   "nav.settings": "Scan & protection",
@@ -277,6 +286,15 @@ type Messages = Record<MessageKey, string>;
 
 const zh: Messages = {
   ...en,
+  "trash.action": "移到废纸篓",
+  "trash.summary": "将所选 {count} 项（扫描占用约 {size}）移到废纸篓，可在 Finder 中恢复。清空废纸篓后才会释放空间。",
+  "trash.progress": "正在移到废纸篓…",
+  "trash.done": "已移到废纸篓",
+  "trash.size": "已移动项目的扫描占用",
+  "trash.caveat": "可在 Finder 中恢复。移到废纸篓不会释放磁盘空间。",
+  "trash.description": "点击目录在右侧展开子项；手动选择不需要的内容并移到废纸篓。",
+  "trash.review": "手动选择后移到废纸篓，可在 Finder 中恢复。",
+  "trash.blocked": "包含受保护内容或扫描不完整，不能移到废纸篓。",
   "brand.tagline": "谨慎地腾出空间",
   "nav.label": "CDisk 导航",
   "nav.quick": "日常清理",
@@ -309,7 +327,7 @@ const zh: Messages = {
   "nav.installers": "安装包",
   "nav.installersDetail": "查找 DMG、PKG、XIP 与 ISO，不把普通 ZIP 当垃圾。",
   "nav.full": "磁盘分析",
-  "nav.fullDetail": "从大目录逐层下钻，找到空间去了哪里。这里只读，不删除。",
+  "nav.fullDetail": "逐层分析磁盘占用，手动选择不需要的内容移到废纸篓。",
   "nav.history": "操作记录",
   "nav.historyDetail": "查看每次清理的结果、跳过原因和实际空间变化。",
   "nav.settings": "扫描与保护",
@@ -583,6 +601,15 @@ function traditionalizeMessages(values: Messages, overrides: Partial<Messages>):
 }
 
 const zhHant = traditionalizeMessages(zh, {
+  "trash.action": "移到垃圾桶",
+  "trash.summary": "將所選 {count} 項（掃描佔用約 {size}）移到垃圾桶，可在 Finder 中復原。清空垃圾桶後才會釋放空間。",
+  "trash.progress": "正在移到垃圾桶…",
+  "trash.done": "已移到垃圾桶",
+  "trash.size": "已移動項目的掃描佔用",
+  "trash.caveat": "可在 Finder 中復原。移到垃圾桶不會釋放磁碟空間。",
+  "trash.description": "點擊目錄在右側展開子項；手動選擇不需要的內容並移到垃圾桶。",
+  "trash.review": "手動選擇後移到垃圾桶，可在 Finder 中復原。",
+  "trash.blocked": "包含受保護內容或掃描不完整，不能移到垃圾桶。",
   "brand.tagline": "謹慎地騰出空間",
   "nav.quick": "日常清理",
   "nav.projects": "專案瘦身",
@@ -633,6 +660,15 @@ const zhHant = traditionalizeMessages(zh, {
 });
 
 const ja = localeOverlay({
+  "trash.action": "ゴミ箱に移動",
+  "trash.summary": "選択した {count} 項目（約 {size}）をゴミ箱に移動します。Finder で復元できます。空き容量はゴミ箱を空にした後に増えます。",
+  "trash.progress": "ゴミ箱に移動中…",
+  "trash.done": "ゴミ箱に移動済み",
+  "trash.size": "移動した項目の使用量",
+  "trash.caveat": "Finder で復元できます。ゴミ箱への移動では空き容量は増えません。",
+  "trash.description": "フォルダをクリックすると右の列に内容が表示されます。不要な項目を手動で選択してゴミ箱に移動します。",
+  "trash.review": "手動で選択してゴミ箱に移動。Finder で復元できます。",
+  "trash.blocked": "保護された内容または不完全なスキャンのため、ゴミ箱に移動できません。",
   "daily.cacheGroup": "キャッシュ",
   "daily.hygieneGroup": "ディスク衛生",
   "daily.logs": "ログと診断",
@@ -684,7 +720,7 @@ const ja = localeOverlay({
   "nav.installers": "インストーラ",
   "nav.installersDetail": "通常の ZIP を対象にせず、DMG、PKG、XIP、ISO を探します。",
   "nav.full": "ディスク分析",
-  "nav.fullDetail": "大きなフォルダを掘り下げます。分析は読み取り専用です。",
+  "nav.fullDetail": "ディスク使用量を調べ、不要な項目を手動で選択してゴミ箱に移動します。",
   "nav.history": "操作履歴",
   "nav.historyDetail": "削除結果、スキップ理由、実際の空き容量変化を確認します。",
   "nav.settings": "スキャンと保護",
@@ -903,6 +939,15 @@ const ja = localeOverlay({
 });
 
 const ko = localeOverlay({
+  "trash.action": "휴지통으로 이동",
+  "trash.summary": "선택한 {count}개 항목(약 {size})을 휴지통으로 이동합니다. Finder에서 복원할 수 있습니다. 휴지통을 비워야 공간이 확보됩니다.",
+  "trash.progress": "휴지통으로 이동 중…",
+  "trash.done": "휴지통으로 이동됨",
+  "trash.size": "이동한 항목의 사용량",
+  "trash.caveat": "Finder에서 복원할 수 있습니다. 휴지통으로 이동해도 디스크 공간은 확보되지 않습니다.",
+  "trash.description": "폴더를 클릭하면 오른쪽 열에 하위 항목이 표시됩니다. 불필요한 항목을 직접 선택해 휴지통으로 이동하세요.",
+  "trash.review": "직접 선택하여 휴지통으로 이동합니다. Finder에서 복원할 수 있습니다.",
+  "trash.blocked": "보호된 내용이나 불완전한 스캔으로 인해 휴지통으로 이동할 수 없습니다.",
   "daily.cacheGroup": "캐시",
   "daily.hygieneGroup": "디스크 정리",
   "daily.logs": "로그 및 진단",
@@ -954,7 +999,7 @@ const ko = localeOverlay({
   "nav.installers": "설치 파일",
   "nav.installersDetail": "일반 ZIP은 제외하고 DMG, PKG, XIP, ISO를 찾습니다.",
   "nav.full": "디스크 분석",
-  "nav.fullDetail": "큰 폴더를 단계별로 확인합니다. 분석은 읽기 전용입니다.",
+  "nav.fullDetail": "디스크 사용량을 확인하고 불필요한 항목을 직접 선택해 휴지통으로 이동합니다.",
   "nav.history": "작업 기록",
   "nav.historyDetail": "정리 결과, 건너뛴 이유와 실제 공간 변화를 확인합니다.",
   "nav.settings": "스캔 및 보호",
@@ -1173,6 +1218,15 @@ const ko = localeOverlay({
 });
 
 const es = localeOverlay({
+  "trash.action": "Mover a la Papelera",
+  "trash.summary": "Mover {count} elementos seleccionados (aprox. {size}) a la Papelera. Se pueden restaurar en Finder. El espacio se libera al vaciarla.",
+  "trash.progress": "Moviendo a la Papelera…",
+  "trash.done": "Movido a la Papelera",
+  "trash.size": "uso de los elementos movidos",
+  "trash.caveat": "Se pueden restaurar en Finder. Mover a la Papelera no libera espacio.",
+  "trash.description": "Haz clic en una carpeta para ver su contenido en la siguiente columna. Selecciona manualmente los elementos que quieras mover a la Papelera.",
+  "trash.review": "Selecciona manualmente para mover a la Papelera; recuperable en Finder.",
+  "trash.blocked": "El contenido protegido o un análisis incompleto impide mover este elemento a la Papelera.",
   "daily.cacheGroup": "Caché",
   "daily.hygieneGroup": "Higiene del disco",
   "daily.logs": "Registros y diagnósticos",
@@ -1224,7 +1278,7 @@ const es = localeOverlay({
   "nav.installers": "Instaladores",
   "nav.installersDetail": "Busca DMG, PKG, XIP e ISO sin tratar los ZIP normales como basura.",
   "nav.full": "Analizar disco",
-  "nav.fullDetail": "Explora carpetas grandes. El análisis es de solo lectura.",
+  "nav.fullDetail": "Explora el uso del disco y mueve manualmente elementos a la Papelera.",
   "nav.history": "Actividad",
   "nav.historyDetail": "Consulta resultados, omisiones y cambios reales de espacio.",
   "nav.settings": "Análisis y protección",
@@ -1443,6 +1497,15 @@ const es = localeOverlay({
 });
 
 const fr = localeOverlay({
+  "trash.action": "Déplacer vers la Corbeille",
+  "trash.summary": "Déplacer {count} éléments sélectionnés (environ {size}) vers la Corbeille. Ils peuvent être restaurés dans Finder. L’espace est libéré après avoir vidé la Corbeille.",
+  "trash.progress": "Déplacement vers la Corbeille…",
+  "trash.done": "Déplacé vers la Corbeille",
+  "trash.size": "occupation des éléments déplacés",
+  "trash.caveat": "Restauration possible dans Finder. Le déplacement vers la Corbeille ne libère pas d’espace.",
+  "trash.description": "Cliquez sur un dossier pour afficher son contenu dans la colonne suivante. Sélectionnez manuellement les éléments à déplacer vers la Corbeille.",
+  "trash.review": "Sélection manuelle pour déplacer vers la Corbeille ; restauration possible dans Finder.",
+  "trash.blocked": "Le contenu protégé ou une analyse incomplète empêche le déplacement vers la Corbeille.",
   "daily.cacheGroup": "Cache",
   "daily.hygieneGroup": "Hygiène du disque",
   "daily.logs": "Journaux et diagnostics",
@@ -1494,7 +1557,7 @@ const fr = localeOverlay({
   "nav.installers": "Installateurs",
   "nav.installersDetail": "Repère les DMG, PKG, XIP et ISO sans traiter les ZIP ordinaires comme inutiles.",
   "nav.full": "Analyse du disque",
-  "nav.fullDetail": "Explore les dossiers volumineux. L’analyse est en lecture seule.",
+  "nav.fullDetail": "Analysez l’espace disque et déplacez manuellement les éléments inutiles vers la Corbeille.",
   "nav.history": "Activité",
   "nav.historyDetail": "Consulte les résultats, les éléments ignorés et l’espace réellement libéré.",
   "nav.settings": "Analyse et protection",
@@ -1778,6 +1841,11 @@ export function localeTag(locale = currentLocale): string {
 }
 
 const backendKeys: Record<string, MessageKey> = {
+  "点击目录在右侧展开子项；手动选择不需要的内容并移到废纸篓": "trash.description",
+  "手动选择后移到废纸篓，可在 Finder 中恢复": "trash.review",
+  "路径包含受保护内容，不能移到废纸篓": "trash.blocked",
+  "目录含敏感内容或扫描不完整，不能移到废纸篓": "trash.blocked",
+  "已移到废纸篓，可在 Finder 中恢复；空间尚未释放": "trash.caveat",
   "系统缓存": "category.system",
   "用户缓存": "category.user",
   "浏览器数据": "category.browser",

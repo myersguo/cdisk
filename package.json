@@ -1,13 +1,13 @@
 {
   "name": "cdisk",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "node --experimental-strip-types --test tests/domain.test.mjs",
-    "test:browser": "node tests/i18n.cjs && node tests/ui.cjs && node tests/tasks.cjs",
+    "test:browser": "node tests/i18n.cjs && node tests/ui.cjs && node tests/tasks.cjs && node tests/trash.cjs && node tests/analysis.cjs",
     "tauri": "tauri",
     "verify": "pnpm test && pnpm build && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },

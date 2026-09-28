@@ -42,8 +42,14 @@ brew install --cask myersguo/tap/cdisk
   handling of artifacts used during the last seven days.
 - **Installer review:** common installer packages in Downloads and Desktop,
   while mounted disk images remain protected.
-- **Disk analysis:** read-only analysis of a custom directory or the Data
-  volume, with drilldown, parent navigation, size sorting, and Finder reveal.
+- **Disk analysis:** analyze a custom directory or the Data volume, with
+  column-based tree navigation, live scan results, size sorting, and Finder reveal.
+  Browse while scanning; the retained tree reuses results and prioritizes the
+  directory you open. Partial sizes are marked with `+`; navigation does not
+  start another scan. Manually selected eligible items within your home folder
+  can be moved to Trash.
+  Scanning continues regardless of the number of discovered nodes; each column
+  displays its 500 largest children.
 - **Protection list:** persistent path protection without discarding existing
   scan results.
 - **Cleanup history:** per-item success, skipped, failure, and interruption
@@ -59,7 +65,10 @@ Pause preserves the current traversal position. Completed and eligible
 candidates remain selectable while paused; entering cleanup preview ends the
 remaining scan and keeps completed results. Cancellation also wakes a paused
 task and preserves completed candidates. Incomplete candidates cannot be
-cleaned until they are rechecked. Disk-analysis results are always read-only.
+cleaned until they are rechecked. Disk analysis requires manual selection and
+confirmation before moving items to macOS Trash. Protected content, mounts,
+occupied paths, and incomplete scans remain blocked. Items can be restored in
+Finder; moving to Trash does not free space until Trash is emptied.
 A scan or cancellation never deletes files.
 
 Candidates are initially unselected. Before permanent deletion, CDisk shows

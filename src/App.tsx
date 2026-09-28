@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api";
 import { age, applySettings, bytes, categoryLabel, diskHealth, emptyTask, formatCount, isScan, mergeProgress, parsePaths, dailyCategories, dailyScope, sections, selection, statusLabel, taskActive, visibleItems } from "./domain";
-import type { Bootstrap, Candidate, HistoryEntry, Preview, Progress, DailyCategory, ScanMode, ScanTask, ValidationProgress, View } from "./domain";
+import type { AnalysisDirectory, Bootstrap, Candidate, HistoryEntry, Preview, Progress, DailyCategory, ScanMode, ScanTask, ValidationProgress, View } from "./domain";
 import { LOCALE_OPTIONS, t, useLocale } from "./i18n";
 import { localizeBackendText, localeTag } from "./locales";
 
@@ -36,7 +36,7 @@ function Confirm({ preview, busy, onClose, onConfirm }: {
   }}>
     <header><Icon name="shield" /><button aria-label={t("confirm.close")} disabled={busy} onClick={onClose}><Icon name="close" /></button></header>
     <h2>{t("confirm.title")}</h2>
-    <p>{t("confirm.summary", { count: preview.items.length, size: bytes(preview.estimatedBytes) })}</p>
+    <p>{t(preview.trash ? "trash.summary" : "confirm.summary", { count: preview.items.length, size: bytes(preview.estimatedBytes) })}</p>
     <div className="confirm-items">{preview.items.map(item => <div key={item.id}>
       <strong>{localizeBackendText(item.title)}<span>{bytes(item.bytes)}</span></strong><code>{item.path}</code><small>{localizeBackendText(item.reason)}</small>
     </div>)}</div>
@@ -44,7 +44,7 @@ function Confirm({ preview, busy, onClose, onConfirm }: {
       {t("confirm.ack")}</label>
     <footer><button disabled={busy} onClick={onClose}>{t("confirm.back")}</button>
       <button className="danger-button" disabled={busy || !ack || !api.native} onClick={onConfirm}>
-        {busy ? t("confirm.cleaning") : api.native ? t("confirm.remove") : t("confirm.demo")}
+        {busy ? t("confirm.cleaning") : api.native ? t(preview.trash ? "trash.action" : "confirm.remove") : t("confirm.demo")}
       </button></footer>
   </dialog>;
 }
@@ -55,11 +55,11 @@ function History({ entries }: { entries: HistoryEntry[] }) {
     {entries.map(entry => <article className="history-entry" key={entry.id}>
       <header><div><h3>{entry.status === "complete" ? t("history.complete") : entry.status === "running" ? t("history.running") : t("history.partial")}</h3>
         <time>{new Date(entry.startedAt * 1000).toLocaleString(localeTag())}</time></div>
-        <strong>{bytes(entry.estimatedBytes)}<small>{t("history.cleanedSize")}</small></strong></header>
+        <strong>{bytes(entry.estimatedBytes)}<small>{t(entry.items.some(item => item.status === "trashed") ? "trash.size" : "history.cleanedSize")}</small></strong></header>
       <p>{t("history.diskAvailable", { before: bytes(entry.availableBefore), after: entry.availableAfter === null ? t("history.unmeasured") : bytes(entry.availableAfter) })}
-        <span>{t("history.spaceCaveat")}</span></p>
+        <span>{t(entry.items.some(item => item.status === "trashed") ? "trash.caveat" : "history.spaceCaveat")}</span></p>
       {entry.items.map((item, i) => <details key={`${entry.id}-${i}`}><summary>
-        <span className={item.status === "removed" ? "success-text" : "warning-text"}>{item.status === "removed" ? t("history.removed") : item.status === "pending" ? t("history.pending") : item.status === "running" ? t("history.runningItem") : item.status === "failed" ? t("history.failed") : t("history.skipped")}</span>
+        <span className={["removed", "trashed"].includes(item.status) ? "success-text" : "warning-text"}>{item.status === "trashed" ? t("trash.done") : item.status === "removed" ? t("history.removed") : item.status === "pending" ? t("history.pending") : item.status === "running" ? t("history.runningItem") : item.status === "failed" ? t("history.failed") : t("history.skipped")}</span>
         {localizeBackendText(item.title)}</summary><code>{item.path}</code><p>{localizeBackendText(item.message)}</p></details>)}
     </article>)}
   </section>;
@@ -114,6 +114,16 @@ export default function App() {
     quick: emptyTask(), projects: emptyTask(), installers: emptyTask(), full: emptyTask(),
   });
   const tasksRef = useRef(tasks);
+  type AnalysisColumn = { id: string | null; root: string; candidates: Candidate[] };
+  const [analysisParents, setAnalysisParents] = useState<AnalysisColumn[]>([]);
+  const analysisParentsRef = useRef(analysisParents);
+  const analysisId = useRef<string | null>(null);
+  const analysisGeneration = useRef(0);
+  const analysisCache = useRef(new Map<string, AnalysisDirectory>());
+  const [analysisDetails, setAnalysisDetails] = useState(false);
+  const [analysisComplete, setAnalysisComplete] = useState(false);
+  const [analysisTruncated, setAnalysisTruncated] = useState(false);
+  const analysisScroll = useRef<HTMLDivElement>(null);
   const [operation, setOperation] = useState<"prepare" | "clean" | "save" | "recheck" | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -152,6 +162,61 @@ export default function App() {
     setTasks(tasksRef.current);
   }
   function receive(p: Progress) { patch(p.mode, current => mergeProgress(current, p)); }
+  function setParents(parents: AnalysisColumn[]) {
+    analysisParentsRef.current = parents;
+    setAnalysisParents(parents);
+  }
+  async function refreshAnalysis(scanId: string) {
+    const generation = analysisGeneration.current;
+    const parents = analysisParentsRef.current;
+    const ids = [...parents.map(column => column.id), analysisId.current];
+    let columns: (AnalysisDirectory | null)[];
+    try { columns = await Promise.all(ids.map((id, index) => api.analysisDirectory(scanId, id, index === ids.length - 1))); }
+    catch (error) {
+      if (tasksRef.current.full.id !== scanId || generation !== analysisGeneration.current) return;
+      throw error;
+    }
+    if (tasksRef.current.full.id !== scanId || generation !== analysisGeneration.current) return;
+    const current = columns.at(-1);
+    if (!current) return;
+    columns.forEach(column => { if (column) analysisCache.current.set(column.directory.id, column); });
+    setParents(parents.map((parent, index) => ({ ...parent, candidates: columns[index]?.children ?? parent.candidates })));
+    analysisId.current = current.directory.id;
+    setAnalysisComplete(current.directory.complete);
+    setAnalysisTruncated(current.truncated);
+    patch("full", task => ({ ...task, root: current.directory.path, candidates: current.children,
+      selected: new Set([...task.selected].filter(id => current.children.some(item => item.id === id && item.cleanable && item.complete))),
+      activeId: current.children.some(item => item.id === task.activeId) ? task.activeId : current.children[0]?.id ?? "",
+    }));
+  }
+  function browseAnalysis(item: Candidate, columnIndex = analysisParentsRef.current.length) {
+    if (busy.current) return;
+    if (!item.isDir && columnIndex === analysisParentsRef.current.length) {
+      setActiveId(item.id); setAnalysisDetails(true); return;
+    }
+    const current = tasksRef.current.full;
+    const branch = [...analysisParentsRef.current, { id: analysisId.current, root: current.root, candidates: current.candidates }];
+    const column = item.isDir ? { id: item.id, root: item.path, candidates: analysisCache.current.get(item.id)?.children ?? [] } : branch[columnIndex];
+    analysisGeneration.current += 1;
+    analysisId.current = column.id;
+    setAnalysisComplete(item.isDir ? item.complete : analysisCache.current.get(column.id || "analysis-root")?.directory.complete ?? false);
+    setParents(branch.slice(0, item.isDir ? columnIndex + 1 : columnIndex));
+    patch("full", { root: column.root, candidates: column.candidates, selected: new Set(), activeId: item.isDir ? "" : item.id, query: "", category: "" });
+    if (!item.isDir) setAnalysisDetails(true);
+    void refreshAnalysis(current.id).catch(error => setError(String(error)));
+  }
+  function browseParent() {
+    const parents = analysisParentsRef.current;
+    const parent = parents.at(-1);
+    if (!parent) { if (report?.parent && !scanning) void scan("full", report.parent); return; }
+    const current = tasksRef.current.full;
+    analysisGeneration.current += 1;
+    analysisId.current = parent.id;
+    setParents(parents.slice(0, -1));
+    patch("full", { root: parent.root, candidates: parent.candidates, selected: new Set(),
+      activeId: parent.candidates.find(item => item.path === current.root)?.id ?? "", query: "", category: "" });
+    void refreshAnalysis(current.id).catch(error => setError(String(error)));
+  }
   useEffect(() => {
     let alive = true;
     api.bootstrap().then(data => {
@@ -174,6 +239,25 @@ export default function App() {
     };
   }, []);
   useEffect(() => { detail.current?.scrollTo(0, 0); }, [view, activeId]);
+  useEffect(() => {
+    if (view !== "full" || !tasks.full.id) return;
+    let alive = true;
+    let pending = false;
+    const update = async () => {
+      if (pending || !alive) return;
+      if (api.native && taskActive(tasksRef.current.full) && tasksRef.current.full.progress?.scannedEntries === 0) return;
+      pending = true;
+      try { await refreshAnalysis(tasks.full.id); }
+      catch (error) { if (alive) setError(String(error)); }
+      finally { pending = false; }
+    };
+    void update();
+    const timer = taskActive(tasks.full) ? setInterval(() => void update(), 300) : undefined;
+    return () => { alive = false; clearInterval(timer); };
+  }, [view, tasks.full.id, tasks.full.state]);
+  useEffect(() => {
+    if (view === "full") analysisScroll.current?.scrollTo({ left: analysisScroll.current.scrollWidth });
+  }, [view, analysisParents.length, analysisDetails, tasks.full.root]);
 
   function navigate(next: View) {
     if (busy.current) return;
@@ -186,6 +270,13 @@ export default function App() {
       return;
     }
     setError(""); setNotice("");
+    if (mode === "full") {
+      analysisGeneration.current += 1;
+      analysisId.current = null;
+      analysisCache.current.clear();
+      setAnalysisComplete(false); setAnalysisTruncated(false);
+      setParents([]);
+    }
     const scanId = `scan-${crypto.randomUUID()}`;
     const control = { paused: false, cancelled: false };
     controls.current.set(scanId, control);
@@ -194,10 +285,11 @@ export default function App() {
     try {
       const next = await api.scan(mode, scanId, root, [...dailySelection], control, receive);
       if (tasksRef.current[mode].id !== scanId) return;
-      patch(mode, current => ({ ...current, report: next, candidates: next.candidates,
-        root: next.root, state: "done", controlPending: false,
-        activeId: next.candidates.some(i => i.id === current.activeId) ? current.activeId : next.candidates[0]?.id ?? "",
+      patch(mode, current => ({ ...current, report: next, candidates: mode === "full" ? current.candidates : next.candidates,
+        root: mode === "full" ? current.root : next.root, state: "done", controlPending: false,
+        activeId: mode === "full" ? current.activeId : next.candidates.some(i => i.id === current.activeId) ? current.activeId : next.candidates[0]?.id ?? "",
         notice: next.cancelled ? t("scan.cancelledNotice") : "" }));
+      if (mode === "full") await refreshAnalysis(scanId);
     } catch (e) {
       if (tasksRef.current[mode].id === scanId) patch(mode, { error: String(e), state: "done", controlPending: false });
     } finally { controls.current.delete(scanId); }
@@ -211,7 +303,8 @@ export default function App() {
       if (api.native) {
         const accepted = await api.call<boolean>(`${action}_scan`, { scanId: current.id });
         if (!accepted) throw new Error(t("scan.controlRejected"));
-        if (action === "pause") {
+        if (action === "pause" && mode === "full") await refreshAnalysis(current.id);
+        if (action === "pause" && mode !== "full") {
           const candidates = await api.call<Candidate[]>("scan_candidates", { scanId: current.id });
           if (tasksRef.current[mode].id === current.id) {
             patch(mode, task => ({
@@ -284,7 +377,7 @@ export default function App() {
       validationScanId.current = scanId;
       setValidation({ scanId, completed: 0, total: chosen.length, currentPath: "" });
       setPreview(api.native ? await api.call("prepare_cleanup", { scanId, candidateIds: chosen.map(i => i.id) }) :
-        { token: "demo", items: chosen, estimatedBytes: chosen.reduce((sum, item) => sum + item.bytes, 0) });
+        { token: "demo", trash: mode === "full", items: chosen, estimatedBytes: chosen.reduce((sum, item) => sum + item.bytes, 0) });
     } catch (e) {
       const message = localizeBackendText(String(e));
       if (message === t("validation.cancelled")) setNotice(message);
@@ -317,17 +410,21 @@ export default function App() {
     try {
       const entry = await api.call<HistoryEntry>("execute_cleanup", { token: pendingPreview.token });
       setHistory(current => [entry, ...current.filter(h => h.id !== entry.id)]);
-      const removedPaths = new Set(entry.items.filter(item => item.status === "removed").map(item => item.path));
+      const removedPaths = new Set(entry.items.filter(item => ["removed", "trashed"].includes(item.status)).map(item => item.path));
+      if (currentMode === "full") analysisCache.current.clear();
       patch(currentMode, current => {
         const candidates = current.candidates.filter(item => !removedPaths.has(item.path));
         return {
           ...current,
           candidates,
-          report: current.report ? { ...current.report, candidates } : null,
+          report: current.report ? { ...current.report, candidates, disk: {
+            ...current.report.disk, availableBytes: entry.availableAfter ?? current.report.disk.availableBytes,
+          } } : null,
           selected: new Set([...current.selected].filter(id => candidates.some(item => item.id === id))),
           activeId: candidates.some(item => item.id === current.activeId) ? current.activeId : candidates[0]?.id || "",
         };
       });
+      if (currentMode === "full") await refreshAnalysis(tasksRef.current.full.id);
       setView("history");
       if (entry.availableAfter !== null) setBoot(current => current ? {
         ...current, disk: { ...current.disk, availableBytes: entry.availableAfter! },
@@ -346,7 +443,7 @@ export default function App() {
       const settings = result.settings;
       setRootsText(settings.projectRoots.join("\n")); setExcludedText(settings.excludedPaths.join("\n"));
       setBoot(current => current ? { ...current, settings } : current);
-      for (const mode of ["quick", "projects", "installers"] as const) {
+      for (const mode of ["quick", "projects", "installers", "full"] as const) {
         patch(mode, current => {
           const candidates = current.candidates.map(item => applySettings(item, settings));
           return {
@@ -383,6 +480,9 @@ export default function App() {
   const total = scopedCandidates.filter(i => i.cleanable && i.complete).reduce((n, i) => n + i.bytes, 0);
   const largest = Math.max(1, ...scopedCandidates.map(i => i.bytes));
   const full = view === "full";
+  const analysisPrefix = `${task.root.replace(/\/$/, "")}/`;
+  const analyzingName = full && scanning && !analysisComplete && progress?.currentPath.startsWith(analysisPrefix)
+    ? progress.currentPath.slice(analysisPrefix.length).split("/")[0] : "";
   const locked = operation !== null || scanning;
   const selectionLocked = operation !== null || task.state === "running" || task.state === "cancelling";
   const canPreview = task.state === "paused" || task.state === "done";
@@ -411,7 +511,7 @@ export default function App() {
       {!api.native && <div className="banner demo">{t("banner.demo")}</div>}
       {error && <div className="banner error" role="alert">{localizeBackendText(error)}<button onClick={() => setError("")} aria-label={t("action.closeError")}><Icon name="close" /></button></div>}
       {notice && <div className="banner notice" role="status">{localizeBackendText(notice)}<button onClick={() => setNotice("")} aria-label={t("action.closeNotice")}><Icon name="close" /></button></div>}
-      {operation === "clean" && <div className="banner notice" role="status" aria-live="polite"><div className="spinner" />{t("confirm.cleaning")}</div>}
+      {operation === "clean" && <div className="banner notice" role="status" aria-live="polite"><div className="spinner" />{t(full ? "trash.progress" : "confirm.cleaning")}</div>}
       {isScan(view) && task.error && <div className="banner error" role="alert">{localizeBackendText(task.error)}<button onClick={() => patch(currentMode, { error: "" })} aria-label={t("action.closeError")}><Icon name="close" /></button></div>}
       {isScan(view) && task.notice && <div className="banner notice" role="status">{task.notice}</div>}
       {operation === "prepare" && validation && <section className="validation-progress" aria-live="polite">
@@ -447,7 +547,7 @@ export default function App() {
             <span>{full ? t("disk.directChildren", { count: task.candidates.length }) : t("disk.reviewable")}</span></div>
         </section>
         {full && <form className="location-bar" onSubmit={e => { e.preventDefault(); void scan("full", rootInput); }}>
-          <button type="button" aria-label={t("action.parentFolder")} disabled={locked || !report?.parent} onClick={() => void scan("full", report!.parent)}>↑</button>
+          <button type="button" aria-label={t("action.parentFolder")} disabled={operation !== null || (!analysisParents.length && (scanning || !report?.parent))} onClick={browseParent}>↑</button>
           <label className="sr-only" htmlFor="scan-root">{t("scan.folder")}</label><input id="scan-root" value={rootInput} onChange={e => setRootInput(e.target.value)} disabled={locked} spellCheck={false} />
           <button type="button" disabled={locked} onClick={() => void scan("full", boot?.home ?? null)}>{t("action.homeFolder")}</button>
           <button type="button" disabled={locked} onClick={() => void scan("full", "/System/Volumes/Data")}>{t("action.wholeDisk")}</button>
@@ -467,39 +567,63 @@ export default function App() {
           <span>{report.unreadableEntries > 0 ? t("scan.readErrors", { count: formatCount(report.unreadableEntries) }) : t("scan.noReadErrors")}
             {report.skippedEntries > 0 && ` · ${t("scan.skipped", { count: formatCount(report.skippedEntries) })}`}{report.truncated && ` · ${t("scan.truncated")}`}</span>
         </div>}
-        <div className="workspace">
+        {full && analysisTruncated && <div className="scan-meta" role="status">{t("scan.truncated")}</div>}
+        <div className={`workspace ${full ? `analysis-workspace ${analysisDetails ? "details-open" : ""}` : ""}`}>
           <section className="candidate-panel">
             <div className="list-toolbar">
               <div className="search-field"><Icon name="search" /><input aria-label={t("search.label")} placeholder={t("search.placeholder")} value={query} onChange={e => setQuery(e.target.value)} /></div>
               <select aria-label={t("sort.label")} value={sort} onChange={e => setSort(e.target.value)}>
                 <option value="size">{t("sort.size")}</option><option value="name">{t("sort.name")}</option><option value="recent">{t("sort.recent")}</option>
               </select>
+              {full && <button aria-pressed={analysisDetails} onClick={() => setAnalysisDetails(open => !open)}>{t("detail.label")}</button>}
             </div>
             <div className="category-tabs" role="group" aria-label={t("filter.category")}>{categories.map(c =>
               <button key={c || "all"} aria-pressed={category === c} onClick={() => setCategory(c)}>{c ? categoryLabel(c) : t("filter.all")}</button>)}</div>
-            {!full && report && <div className="selection-tools">
-              <button disabled={selectionLocked} onClick={() => setSelected(new Set(items.filter(i => i.cleanable && i.complete && i.recommended).map(i => i.id)))}>{t("action.selectRecommended")}</button>
+            {report && <div className="selection-tools">
+              {!full && <button disabled={selectionLocked} onClick={() => setSelected(new Set(items.filter(i => i.cleanable && i.complete && i.recommended).map(i => i.id)))}>{t("action.selectRecommended")}</button>}
               <button disabled={selectionLocked} onClick={() => setSelected(new Set())}>{t("action.clearSelection")}</button>
               <span>{t("selection.recentKept")}</span>
             </div>}
-            <div className="candidate-list" tabIndex={0} aria-label={t("list.label")}>
+            <div className={full ? "analysis-columns" : "candidate-list"} ref={full ? analysisScroll : undefined} tabIndex={0} aria-label={t("list.label")}>
+              {full && analysisParents.map((column, index) => <section className="analysis-column ancestor-column" key={column.root} aria-label={column.root}>
+                <div className="analysis-column-header" title={column.root}>{column.root.split("/").filter(Boolean).at(-1) || "/"}</div>
+                <div className="analysis-column-list">{visibleItems(column.candidates, "", "", sort).map(item => <div
+                  className={`candidate-row analysis-row ${item.path === (analysisParents[index + 1]?.root || task.root) ? "branch-active" : ""}`} key={item.id}>
+                  <button className="candidate-open" disabled={operation !== null} title={item.path}
+                    onClick={() => browseAnalysis(item, index)}>
+                    <strong className="analysis-size">{bytes(item.bytes)}{!item.complete && "+"}</strong>
+                    <span className="analysis-name">{localizeBackendText(item.title)}</span>
+                    {item.isDir && <Icon name="arrow" />}
+                  </button>
+                </div>)}</div>
+              </section>)}
+              <section className={full ? "analysis-column current-column" : "current-list"} aria-label={full ? task.root : undefined}>
+              {full && <div className="analysis-column-header" title={task.root}>{task.root.split("/").filter(Boolean).at(-1) || "/"}{scanning && !analysisComplete && <div className="spinner" />}</div>}
+              <div className={full ? "analysis-column-list candidate-list" : "current-list"}>
               {!report && !task.candidates.length && <Empty title={scanning ? task.state === "paused" ? t("empty.scanPaused") : t("empty.scanning") : t("empty.start")} text={scanning ? t("empty.scanningText") : full ? t("empty.fullText") : t("empty.startText")} />}
               {report && !items.length && <Empty title={query ? t("empty.noMatch") : t("empty.noCandidates")} text={t("empty.tryAnother")} />}
-              {items.map(item => <div className={`candidate-row ${activeId === item.id ? "active" : ""}`} key={item.id}>
-                {!full && <input type="checkbox" aria-label={t("list.selectItem", { title: localizeBackendText(item.title) })} checked={selected.has(item.id)}
+              {items.map(item => <div className={`candidate-row ${full ? "analysis-row" : ""} ${activeId === item.id ? "active" : ""}`} key={item.id}>
+                <input type="checkbox" aria-label={t("list.selectItem", { title: localizeBackendText(item.title) })} checked={selected.has(item.id)}
                   disabled={selectionLocked || !item.cleanable || !item.complete} onChange={() => setSelected(current => {
                     const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next;
-                  })} />}
-                <button className="candidate-open" onClick={() => setActiveId(item.id)}
-                  onDoubleClick={() => { if (full && item.isDir && !locked) void scan("full", item.path); }}>
+                  })} />
+                <button className="candidate-open" title={full ? item.path : undefined} onClick={() => {
+                  if (full) browseAnalysis(item); else setActiveId(item.id);
+                }}>
+                  {full ? <><strong className="analysis-size">{bytes(item.bytes)}{!item.complete && "+"}</strong>
+                    <span className="analysis-name">{localizeBackendText(item.title)}</span>{item.isDir && <Icon name="arrow" />}</> : <>
                   <div className={`item-icon ${item.cleanable ? "" : "muted"}`}><Icon name={item.isDir ? "folder" : "file"} /></div>
                   <div className="item-name"><strong>{localizeBackendText(item.title)}</strong><code title={item.path}>{item.path.replace(boot?.home ?? "/Users/demo", "~")}</code>
                     <div className="size-track"><i style={{ width: `${Math.max(1, item.bytes / largest * 100)}%` }} /></div>
                   </div>
                   <div className="item-stat"><strong>{bytes(item.bytes)}</strong><span className={`badge ${item.status}`}>{statusLabel(item.status)}</span></div>
                   <Icon name="arrow" />
+                  </>}
                 </button>
               </div>)}
+              {full && analyzingName && !task.candidates.some(item => item.title === analyzingName) &&
+                <div className="analysis-pending" title={progress?.currentPath}><div className="spinner" /><span>{analyzingName}</span><small>{t("action.scanning")}</small></div>}
+              </div></section>
             </div>
           </section>
           <aside className="detail-panel" ref={detail} tabIndex={0} aria-label={t("detail.label")}>
@@ -511,9 +635,9 @@ export default function App() {
               <div className="detail-size">{bytes(active.bytes)}<small>{active.status === "partial" ? t("detail.partialSize") : t("detail.scanSize")}</small></div>
               <dl><div><dt>{t("detail.type")}</dt><dd>{categoryLabel(active.category)}</dd></div><div><dt>{t("detail.recent")}</dt><dd>{age(active.modifiedAt)}</dd></div><div><dt>{t("detail.entries")}</dt><dd>{formatCount(active.entries)}</dd></div></dl>
               <label className="path-label">{t("detail.fullPath")}</label><code className="path-block">{active.path}</code>
-              <div className="detail-actions">{full && active.isDir && <button disabled={locked} className="primary" onClick={() => void scan("full", active.path)}>{t("action.enterFolder")}<Icon name="arrow" /></button>}
+              <div className="detail-actions">{full && active.isDir && <button disabled={operation !== null} className="primary" onClick={() => browseAnalysis(active)}>{t("action.enterFolder")}<Icon name="arrow" /></button>}
                 <button disabled={locked || !report} onClick={() => void reveal(active)}>{t("action.revealFinder")}</button>
-                {!full && <button disabled={locked || !report} onClick={() => void recheck(active)}>{t("action.recheck")}</button>}
+                <button disabled={locked || !report} onClick={() => void recheck(active)}>{t("action.recheck")}</button>
                 {active.protection === "manual" && active.excludedBy ?
                   <div className="manual-rule"><small>{t("detail.manualRule", { rule: active.excludedBy })}</small>
                     <button disabled={locked || !report} onClick={() => void recheck(active, true)}>{t("action.removeProtection")}</button></div> :
@@ -524,10 +648,9 @@ export default function App() {
             </>}
           </aside>
         </div>
-        <footer className="action-bar"><div>{full ? <><Icon name="shield" /><span>{t("selection.readOnly")}</span></> :
-          <><span>{t("selection.count", { count: chosen.length })}</span><strong>{bytes(chosen.reduce((sum, i) => sum + i.bytes, 0))}</strong></>}</div>
-          {!full && <button className="primary" disabled={operation !== null || !canPreview || !chosen.length} onClick={() => void prepare()}>
-            {operation === "prepare" ? t("action.revalidating") : t("action.previewCleanup")}<Icon name="arrow" /></button>}
+        <footer className="action-bar"><div><span>{t("selection.count", { count: chosen.length })}</span><strong>{bytes(chosen.reduce((sum, i) => sum + i.bytes, 0))}</strong></div>
+          <button className="primary" disabled={operation !== null || !canPreview || !chosen.length} onClick={() => void prepare()}>
+            {operation === "prepare" ? t("action.revalidating") : t(full ? "trash.action" : "action.previewCleanup")}<Icon name="arrow" /></button>
         </footer>
       </>}
       {view === "history" && <History entries={history} />}
